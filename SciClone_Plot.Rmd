@@ -1,0 +1,565 @@
+---
+title: "SciClone"
+author: "Tobi Agbede"
+date: "2026-01-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+#SciClone code for 1-3 samples
+
+library(sciClone)
+
+#read in vaf data from three related tumors
+#format is 5 column, tab delimited: 
+#chr, pos, ref_reads, var_reads, vaf
+
+v1 <- read.table("~/Desktop/TSVs/CA-08-01-P-DNA.tsv",
+                 header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+v2 <- read.table("/Users/tobiagbede/Desktop/TSVs/CA-08-R-P-DNA.tsv",
+                 header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+#v3 <- read.table("/Users/tobiagbede/Desktop/TSVs/CA-07-07-P-DNA.tsv",
+#                 header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+#read in regions to exclude (commonly LOH)
+#format is 3-col bed
+#regions = read.table("data/exclude.loh")
+regions <- read.table("~/Desktop/Bed_Exclude/CA-07-01-O-DNA.bed",
+                      header = FALSE,
+                      sep = "\t",
+                      stringsAsFactors = FALSE)
+
+regions <- regions[complete.cases(regions), ]
+colnames(regions) <- c("chr", "start", "end")
+
+#read in segmented copy number data
+#4 columns - chr, start, stop, segment_mean   
+cn1 <- read.table("/Users/tobiagbede/Desktop/CNA/CA-08-01-P-DNA.tsv",
+                  header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+cn2 <- read.table("/Users/tobiagbede/Desktop/CNA/CA-08-R-P-DNA.tsv",
+                  header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+cn3 <- read.table("/Users/tobiagbede/Desktop/CNA/CA-07-07-P-DNA.tsv",
+                  header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+#set sample names
+names = c("CA-07-01","CA-07-03","CA-07-07")
+
+```
+
+```{r}
+
+#Plot and clustering for just one sample
+#------------------------------------
+#1d clustering on just one sample
+sc = sciClone(vafs=v1,
+         copyNumberCalls=cn1,
+         sampleNames=names[1])
+         #regionsToExclude=regions)
+
+#create output
+writeClusterTable(sc, "~/Desktop/SciClone_Results/cluster_table3.tsv")
+sc.plot1d(sc,"~/Desktop/SciClone_Results/clusters3.1d.pdf")
+
+#Plot and clustering for two samples
+
+#2d clustering using two samples:
+sc = sciClone(vafs=list(v1,v2),
+              copyNumberCalls=list(cn1,cn2),
+              sampleNames=names[1:2],
+               regionsToExclude=regions)
+#create output
+writeClusterTable(sc, "~/Desktop/SciClone_Results/clusters2.tsv")
+sc.plot1d(sc,"~/Desktop/SciClone_Results/clusters2.2.1d.pdf")
+sc.plot2d(sc,"~/Desktop/SciClone_Results/clusters2.2d.pdf")
+
+#Plot and clustering for three  samples
+#3d clustering using three samples:
+sc = sciClone(vafs=list(v1,v2,v3),
+              copyNumberCalls=list(cn1,cn2,cn3),
+              sampleNames=names[1:3],
+               regionsToExclude=regions)
+#create output
+writeClusterTable(sc, "~/Desktop/SciClone_Results/clusters2.tsv")
+sc.plot1d(sc,"~/Desktop/SciClone_Results/clusters2.2.1d.pdf")
+sc.plot2d(sc,"~/Desktop/SciClone_Results/clusters2.2d.pdf")
+sc.plot3d(sc, sc@sampleNames, size=700, outputFile="~/Desktop/SciClone_Results/clusters3.3d.jpeg")
+
+
+```
+
+
+```{r}
+##VCF FIX GENERATION IF NOT ALREADY DONE - Multiplies VAF By 100
+library(tidyverse)
+
+dir.create("~/Desktop/BM/VCF_fix", showWarnings = FALSE)  # make output dir
+
+list.files("~/Desktop/BM/VCF_2", pattern = "\\.tsv$", full.names = TRUE) %>%
+  walk(~ {
+    df <- read_tsv(.x, show_col_types = FALSE)
+    if("vaf" %in% colnames(df)) df$vaf <- df$vaf * 100
+    write_tsv(df, file.path("~/Desktop/BM/VCF_fix", basename(.x)))
+  })
+```
+
+
+
+```{r}
+#Robust version
+library(sciClone)
+
+# Folders
+vaf_dir <- "~/Desktop/BM/VCF_fix"
+cn_dir  <- "~/Desktop/BM/CNA_2"
+output_dir_pdf <- "~/Desktop/BM/SciClone/Results/PDFs"
+output_dir_tsv <- "~/Desktop/BM/SciClone/Results/TSVs"
+
+
+# Get all v1 files
+v1_files <- list.files(vaf_dir, pattern = "\\.tsv$", full.names = TRUE)
+
+
+# Track failed samples
+failed_samples <- c()
+
+for(v1_file in v1_files) {
+  
+  sample_name <- tools::file_path_sans_ext(basename(v1_file))
+  cn_file <- file.path(cn_dir, paste0(sample_name, ".tsv"))
+  
+  if(!file.exists(cn_file)) {
+    warning(paste("CN file not found for", sample_name, "- skipping"))
+    failed_samples <- c(failed_samples, sample_name)
+    next
+  }
+  
+  # Read files
+  v1 <- read.table(v1_file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+  cn1 <- read.table(cn_file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+  
+  # Wrap sciClone in tryCatch
+  sc <- tryCatch({
+    sciClone(vafs = v1,
+             copyNumberCalls = cn1,
+             sampleNames = sample_name)
+  }, error = function(e) {
+    warning(paste("sciClone failed for", sample_name, ":", e$message))
+    return(NULL)
+  })
+  
+  # If sciClone failed, skip to next
+  if(is.null(sc)) {
+    failed_samples <- c(failed_samples, sample_name)
+    next
+  }
+  
+  # Write outputs
+  out_table <- file.path(output_dir_tsv, paste0(sample_name, "_cluster_table.tsv"))
+  out_pdf   <- file.path(output_dir_pdf, paste0(sample_name, "_clusters1d.pdf"))
+  
+  tryCatch({
+    writeClusterTable(sc, out_table)
+  }, error = function(e) {
+    warning(paste("writeClusterTable failed for", sample_name, ":", e$message))
+  })
+  
+  tryCatch({
+    sc.plot1d(sc, out_pdf)
+  }, error = function(e) {
+    warning(paste("sc.plot1d failed for", sample_name, ":", e$message))
+  })
+  
+  message(paste("Processed sample:", sample_name))
+}
+
+# Report all failed samples at the end
+if(length(failed_samples) > 0){
+  message("The following samples failed:")
+  print(failed_samples)
+} else {
+  message("All samples processed successfully!")
+}
+```
+
+
+```{r}
+# find interesing samples by checking if cluster is >1 
+library(dplyr)
+
+output_dir <- "~/Desktop/UofT/PhD/Pugh Lab/Projects/Aim1_Clones/SciClone/Results/TSVs"
+
+# all cluster tables
+cluster_files <- list.files(output_dir, pattern="_cluster_table.tsv$", full.names = TRUE)
+
+results <- data.frame(sample=character(), num_clusters=integer(), stringsAsFactors=FALSE)
+
+for(f in cluster_files){
+  df <- read.table(f, header=TRUE, sep="\t", stringsAsFactors = FALSE)
+  
+  # remove unassigned cluster 0
+  assigned <- df %>% filter(cluster != 0)
+  
+  # number of unique clusters
+  n_clusters <- length(unique(assigned$cluster))
+  
+  results <- rbind(results, data.frame(sample=tools::file_path_sans_ext(basename(f)), 
+                                       num_clusters = n_clusters))
+}
+
+# flag "interesting" if more than 1 cluster
+results$interesting <- results$num_clusters > 1
+
+# sort by most clusters
+results <- results %>% arrange(desc(num_clusters))
+
+print(results)
+
+write.csv(results, file = "~/Desktop/UofT/PhD/Pugh Lab/Projects/Aim1_Clones/SciClone/Results/Summary/Cluster_Summary.csv")
+```
+
+
+```{r}
+#Some Data Cleaning for tsv to remove NA's
+
+# Directory with TSV files
+dir <- "~/Desktop/TSV_Ultima"
+
+# Get all TSV files
+files <- list.files(dir, pattern = "\\.tsv$", full.names = TRUE)
+
+for (f in files) {
+
+  message("Processing: ", basename(f))
+
+  # Read file
+  df <- read.table(
+    f,
+    header = TRUE,
+    sep = "\t",
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+
+  # Ensure file has at least 4 columns
+  if (ncol(df) < 4) {
+    warning("Skipping (less than 4 columns): ", basename(f))
+    next
+  }
+
+  # Convert 4th column: comma decimal -> dot -> numeric
+  df[[4]] <- as.numeric(gsub(",", ".", df[[4]]))
+
+  # Optional sanity check
+  if (all(is.na(df[[4]]))) {
+    warning("All values became NA in 4th column for: ", basename(f))
+  }
+
+  # Write back (overwrite)
+  write.table(
+    df,
+    file = f,
+    sep = "\t",
+    quote = FALSE,
+    row.names = FALSE
+  )
+}
+
+message("Done converting 4th column for all TSV files.")
+```
+
+
+
+```{r}
+#Metadata preparation for multisample analysis
+library(stringr)
+library(dplyr)
+library(readr)
+
+# =========================
+# Paths
+# =========================
+vaf_dir  <- "~/Desktop/UofT/PhD/Pugh Lab/Projects/Aim1_Clones/SciClone/VCF"
+meta_out <- "~/Desktop/UofT/PhD/Pugh Lab/Projects/Aim1_Clones/SciClone/sample_metadata_review.csv"
+
+files <- list.files(vaf_dir, pattern = "\\.tsv$", full.names = FALSE)
+
+# =========================
+# Helper functions
+# =========================
+get_platform <- function(x) {
+  if (grepl("Ultima", x, ignore.case = TRUE)) "Ultima" else "Standard"
+}
+
+get_material <- function(x) {
+  if (grepl("-P-", x)) return("P")
+  if (grepl("-O-", x)) return("O")
+  NA
+}
+
+# =========================
+# Patient parsing
+# =========================
+get_patient <- function(x) {
+  
+  # Ignore non-standard
+  if (grepl("^BM|^SPOR", x)) return(NA)
+  
+  if (grepl("^M4-", x)) {
+    parts <- unlist(strsplit(x, "-"))
+    if (length(parts) >= 4) return(paste(parts[2], parts[3], sep = "-"))
+    return(NA)
+  }
+  
+  if (grepl("^(CA|EK|VA|HP|RE|ZC|FZ|PL|MJ)-", x)) {
+    m <- str_match(x, "^([A-Z0-9]+-[0-9]{2})-")
+    if (!is.na(m[1,2])) return(m[1,2])
+    return(NA)
+  }
+  
+  if (grepl("^(MyP|MyC|MYC|MyR)-", x, ignore.case = TRUE)) {
+    parts <- unlist(strsplit(x, "-"))
+    if (length(parts) >= 2) return(paste(parts[1], parts[2], sep = "-"))
+    return(NA)
+  }
+  
+  # PL# special
+  if (grepl("^PL[0-9]+-", x)) {
+    parts <- unlist(strsplit(x, "-"))
+    if (length(parts) >= 1) return(parts[1])
+    return(NA)
+  }
+  
+  NA
+}
+
+# =========================
+# Timepoint parsing
+# =========================
+get_timepoint <- function(x) {
+  
+  if (grepl("-R-", x)) return("R")
+  
+  # M4 special
+  if (grepl("^M4-", x)) {
+    parts <- unlist(strsplit(x, "-"))
+    if (length(parts) >= 5) return(parts[4])
+    return(NA)
+  }
+  
+  # Standard / PL / MJ
+  if (grepl("^(CA|EK|VA|HP|RE|ZC|FZ|PL|MJ)-", x)) {
+    nums <- str_extract_all(x, "-[0-9]{2}")[[1]]
+    if (length(nums) >= 2) return(gsub("-", "", nums[2]))
+    return(NA)
+  }
+  
+  # MyP / MyC / MYC / MyR
+  if (grepl("^(MyP|MyC|MYC|MyR)-", x, ignore.case = TRUE)) {
+    m <- str_match(x, "-T(\\d+)")
+    if (!is.na(m[1,2])) return(m[1,2])
+    return(NA)
+  }
+  
+  # PL# special
+  if (grepl("^PL[0-9]+-", x)) {
+    m <- str_match(x, "-T?(\\d+)-")
+    if (!is.na(m[1,2])) return(m[1,2])
+    return(NA)
+  }
+  
+  NA
+}
+
+# =========================
+# Build metadata table
+# =========================
+meta <- tibble(
+  file      = files,
+  basename  = tools::file_path_sans_ext(files),
+  platform  = sapply(files, get_platform),
+  material  = sapply(files, get_material),
+  patient   = sapply(files, get_patient),
+  timepoint = sapply(files, get_timepoint)
+) %>%
+  mutate(
+    exclude_reason = case_when(
+      material == "O" ~ "O sample excluded",
+      is.na(patient) ~ "Non-standard / parse failed",
+      is.na(timepoint) ~ "Timepoint parse failed",
+      TRUE ~ NA_character_
+    )
+  )
+
+# =========================
+# Save for manual review
+# =========================
+write_csv(meta, meta_out)
+
+message("✅ Sample metadata written to:")
+message(meta_out)
+message("Please review before running SciClone.")
+```
+
+```{r}
+# =========================================================================
+# Multi-Sample SciClone Analysis with Metadata-Based Patient Parsing
+# =========================================================================
+
+library(sciClone)
+library(stringr)
+library(dplyr)
+library(readr)
+
+# =========================
+# Paths
+# =========================
+vaf_dir <- "~/Desktop/UofT/PhD/Pugh Lab/Projects/Aim1_Clones/SciClone/VCF_fix"
+cn_dir  <- "~/Desktop/UofT/PhD/Pugh Lab/Projects/Aim1_Clones/SciClone/CNA"
+output_dir_pdf <- "~/Desktop/UofT/PhD/Pugh Lab/Projects/Aim1_Clones/SciClone/Results_Multi/PDFs"
+output_dir_tsv <- "~/Desktop/UofT/PhD/Pugh Lab/Projects/Aim1_Clones/SciClone/Results_Multi/TSVs"
+meta_file <- "~/Desktop/UofT/PhD/Pugh Lab/Projects/Aim1_Clones/SciClone/sample_metadata_review.csv"
+
+dir.create(output_dir_pdf, showWarnings = FALSE, recursive = TRUE)
+dir.create(output_dir_tsv, showWarnings = FALSE, recursive = TRUE)
+
+# =========================
+# Load metadata and FILTER O samples
+# =========================
+meta <- read_csv(meta_file, show_col_types = FALSE) %>%
+  filter(is.na(exclude_reason))  # Excludes O, parse failures, etc.
+
+# =========================
+# Group by patient + platform
+# Only process groups with ≥2 samples
+# =========================
+groups <- meta %>%
+  group_by(patient, platform) %>%
+  filter(n() >= 2) %>%
+  arrange(timepoint) %>%
+  group_split()
+
+message("Found ", length(groups), " groups with ≥2 P samples (O samples excluded)")
+
+failed_patients <- c()
+
+# =========================
+# Process per group
+# =========================
+for(g in groups) {
+  
+  patient_id <- unique(g$patient)
+  platform_id <- unique(g$platform)
+  
+  message("\n==============================")
+  message("Processing: ", patient_id, " | Platform: ", platform_id)
+  message("Samples: ", paste(g$basename, collapse = ", "))
+  message("==============================")
+  
+  vaf_list <- list()
+  cn_list  <- list()
+  sample_names <- c()
+  
+  for(i in seq_len(nrow(g))) {
+    
+    sample_name <- g$basename[i]
+    vaf_file <- file.path(vaf_dir, paste0(sample_name, ".tsv"))
+    cn_file <- file.path(cn_dir, paste0(sample_name, ".tsv"))
+    
+    if(!file.exists(vaf_file) || !file.exists(cn_file)) {
+      warning("Missing file for ", sample_name, " — skipping")
+      next
+    }
+    
+    # Read data
+    vaf <- read.table(vaf_file, header = TRUE, sep = "\t",
+                      stringsAsFactors = FALSE)
+    cn <- read.table(cn_file, header = TRUE, sep = "\t",
+                     stringsAsFactors = FALSE)
+    
+    # Ensure st, end columns are numeric
+    if("st" %in% colnames(vaf)) vaf$st <- as.numeric(vaf$st)
+    if("end" %in% colnames(vaf)) vaf$end <- as.numeric(vaf$end)
+    if("st" %in% colnames(cn)) cn$st <- as.numeric(cn$st)
+    if("end" %in% colnames(cn)) cn$end <- as.numeric(cn$end)
+    
+    vaf_list[[sample_name]] <- vaf
+    cn_list[[sample_name]] <- cn
+    sample_names <- c(sample_names, sample_name)
+  }
+  
+  if(length(vaf_list) < 2) {
+    warning("Not enough valid samples for ", patient_id, " | ", platform_id)
+    failed_patients <- c(failed_patients, paste(patient_id, platform_id, sep = "_"))
+    next
+  }
+  
+  # =========================
+  # Run SciClone
+  # =========================
+  sc <- tryCatch({
+    sciClone(
+      vafs = vaf_list,
+      copyNumberCalls = cn_list,
+      sampleNames = sample_names
+    )
+  }, error = function(e) {
+    warning("sciClone failed: ", e$message)
+    return(NULL)
+  })
+  
+  if(is.null(sc)) {
+    failed_patients <- c(failed_patients, paste(patient_id, platform_id, sep = "_"))
+    next
+  }
+  
+  # =========================
+  # Save outputs
+  # =========================
+  out_table <- file.path(output_dir_tsv,
+                         paste0(patient_id, "_", platform_id, "_multi_cluster_table.tsv"))
+  out_pdf <- file.path(output_dir_pdf,
+                       paste0(patient_id, "_", platform_id, "_multi_clusters1d.pdf"))
+  
+  tryCatch({
+    writeClusterTable(sc, out_table)
+    message("  ✓ Saved: ", basename(out_table))
+  }, error = function(e) {
+    warning("writeClusterTable failed")
+  })
+  
+  tryCatch({
+    sc.plot1d(sc, out_pdf)
+    message("  ✓ Saved: ", basename(out_pdf))
+  }, error = function(e) {
+    warning("sc.plot1d failed")
+  })
+  
+  message("✓ Finished: ", patient_id, " | ", platform_id)
+}
+
+# =========================
+# Summary
+# =========================
+message("\n", strrep("=", 50))
+if(length(failed_patients) > 0) {
+  message("❌ Failed groups (", length(unique(failed_patients)), "):")
+  print(unique(failed_patients))
+} else {
+  message("✅ All groups processed successfully!")
+}
+message("Output: ", output_dir_pdf)
+
+```
+
+
+
+
