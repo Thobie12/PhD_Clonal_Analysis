@@ -1,0 +1,3440 @@
+---
+title: "VAF Analysis in depth"
+output: html_document
+date: "2026-01-26"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+# ============================================================================
+# VAF ANALYSIS: GENOMIC REGIONS vs. DATA TYPE COMPARISON
+# Comprehensive Publication-Ready Analysis
+# ============================================================================
+# This script compares VAF distributions across genomic bins and VAF levels
+# to assess which cfDNA platform (Illumina vs. Ultima) most closely resembles
+# bone marrow (BM) across the genome
+# ============================================================================
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(ggpubr)
+library(purrr)
+
+# ============================================================================
+# 0) CREATE OUTPUT DIRECTORY
+# ============================================================================
+output_dir <- "/Users/tobiagbede/Desktop/vaf_analysis_output"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+cat("✓ Output directory created:", output_dir, "\n\n")
+
+# ============================================================================
+# 1) FILES + METADATA
+# ============================================================================
+vcf_dir <- "/Users/tobiagbede/Desktop/UofT/PhD/Pugh Lab/Projects/Aim1_Clones/SciClone/VCF_fix/"
+files <- list.files(vcf_dir, pattern = "\\.tsv$", full.names = TRUE)
+
+parse_filename <- function(path) {
+  fname <- basename(path) %>% str_remove("\\.tsv$")
+  is_ultima <- str_detect(fname, "_Ultima$")
+  is_bm     <- str_detect(fname, "-O-DNA")
+  sample_id <- fname %>%
+    str_remove("_Ultima$") %>%
+    str_extract("^[A-Z]{2}-\\d{2}-\\d{2}")
+  data_type <- if (is_bm) {
+    "BM"
+  } else if (is_ultima) {
+    "Ultima_cfDNA"
+  } else {
+    "Illumina_cfDNA"
+  }
+  tibble(
+    file = path,
+    sample_id = sample_id,
+    data_type = data_type
+  )
+}
+
+file_meta <- map_dfr(files, parse_filename) %>%
+  filter(!is.na(sample_id))
+
+# ============================================================================
+# 2) READ FILES (ATTACH METADATA CORRECTLY)
+# ============================================================================
+vaf_data <- file_meta %>%
+  mutate(
+    data = map(file, ~ read.delim(.x, sep = "\t", stringsAsFactors = FALSE))
+  ) %>%
+  unnest(data)
+
+# ============================================================================
+# 3) CLEAN + TRANSFORM
+# ============================================================================
+vaf_data <- vaf_data %>%
+  mutate(
+    # Clean chromosome
+    chr_clean = str_remove(chr, "^chr"),
+    chr_clean = ifelse(chr_clean %in% c("M", "MT"), "MT", chr_clean),
+
+    # Convert to numeric chromosomes
+    chr_num = case_when(
+      chr_clean == "X"  ~ 23L,
+      chr_clean == "Y"  ~ 24L,
+      chr_clean == "MT" ~ 25L,
+      TRUE ~ suppressWarnings(as.integer(chr_clean))
+    ),
+
+    # Genomic position for binning
+    genomic_pos = if_else(
+      is.na(chr_num),
+      NA_real_,
+      (chr_num - 1) * 250e6 + as.numeric(pos)
+    ),
+
+    # Alternating chromosome colors
+    chr_color = if_else(chr_num %% 2 == 0, "white", "grey95")
+  ) %>%
+  filter(
+    !is.na(chr_num),
+    is.finite(vaf),
+    vaf >= 0
+  ) %>%
+  group_by(sample_id, data_type) %>%
+  mutate(
+    count_id = row_number(),
+    n_total = n()
+  ) %>%
+  ungroup()
+
+# ============================================================================
+# 4) SANITY CHECKS
+# ============================================================================
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("DATA QUALITY CHECKS\n")
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("Total rows:", nrow(vaf_data), "\n")
+cat("Unique samples:", n_distinct(vaf_data$sample_id), "\n")
+cat("Unique data types:", unique(vaf_data$data_type), "\n")
+cat("Unique files:", n_distinct(vaf_data$file), "\n")
+
+stopifnot(
+  vaf_data %>%
+    distinct(file, sample_id) %>%
+    count(file) %>%
+    pull(n) %>%
+    all(. == 1)
+)
+cat("✓ Metadata mapping validated\n\n")
+
+# ============================================================================
+# 5) SAMPLE FOR PLOTTING
+# ============================================================================
+set.seed(42)
+vaf_plot <- vaf_data %>%
+  group_by(sample_id, data_type) %>%
+  slice_sample(n = 10000, replace = FALSE) %>%
+  ungroup()
+
+# ============================================================================
+# 6) SCATTER PLOTS: GENOMIC POSITION vs VAF
+# ============================================================================
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("GENERATING FIGURE 1: SCATTER PLOTS (All VAF ranges)\n")
+cat("═══════════════════════════════════════════════════════════════════════\n")
+
+# Full VAF range
+p1 <- ggplot(vaf_plot, aes(x = genomic_pos / 1e9, y = vaf/100, color = data_type)) +
+  geom_point(alpha = 0.5, size = 0.8) +
+  facet_wrap(~data_type, scales = "free_x", ncol = 1) +
+  labs(
+    x = "Genomic Position (Gb)",
+    y = "VAF",
+    color = "Data Type",
+    title = "VAF Distribution Across the Genome",
+    subtitle = "All variants, colored by sequencing platform"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(face = "bold", size = 11),
+    legend.position = "bottom",
+    plot.title = element_text(size = 13, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40")
+  )
+
+ggsave(
+  file.path(output_dir, "Fig1_VAF_vs_GenomicPos_AllRanges.pdf"),
+  p1,
+  width = 12, height = 10, dpi = 300
+)
+ggsave(
+  file.path(output_dir, "Fig1_VAF_vs_GenomicPos_AllRanges.png"),
+  p1,
+  width = 12, height = 10, dpi = 300
+)
+cat("✓ Figure 1 saved\n\n")
+
+# VAF < 0.5
+p2 <- ggplot(vaf_plot, aes(x = genomic_pos / 1e9, y = vaf/100, color = data_type)) +
+  geom_point(alpha = 0.5, size = 0.8) +
+  facet_wrap(~data_type, scales = "free_x", ncol = 1) +
+  coord_cartesian(ylim = c(0, 0.5)) +
+  labs(
+    x = "Genomic Position (Gb)",
+    y = "VAF",
+    color = "Data Type",
+    title = "VAF Distribution: Low VAF Range (0 - 0.5)",
+    subtitle = "Subclonal variants"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(face = "bold", size = 11),
+    legend.position = "bottom",
+    plot.title = element_text(size = 13, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40")
+  )
+
+ggsave(
+  file.path(output_dir, "Fig2_VAF_vs_GenomicPos_LowVAF.pdf"),
+  p2,
+  width = 12, height = 10, dpi = 300
+)
+ggsave(
+  file.path(output_dir, "Fig2_VAF_vs_GenomicPos_LowVAF.png"),
+  p2,
+  width = 12, height = 10, dpi = 300
+)
+cat("✓ Figure 2 saved\n\n")
+
+# VAF > 0.5
+p3 <- ggplot(vaf_plot, aes(x = genomic_pos / 1e9, y = vaf/100, color = data_type)) +
+  geom_point(alpha = 0.5, size = 0.8) +
+  facet_wrap(~data_type, scales = "free_x", ncol = 1) +
+  coord_cartesian(ylim = c(0.5, 1.0)) +
+  labs(
+    x = "Genomic Position (Gb)",
+    y = "VAF",
+    color = "Data Type",
+    title = "VAF Distribution: High VAF Range (0.5 - 1.0)",
+    subtitle = "Clonal variants"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(face = "bold", size = 11),
+    legend.position = "bottom",
+    plot.title = element_text(size = 13, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40")
+  )
+
+ggsave(
+  file.path(output_dir, "Fig3_VAF_vs_GenomicPos_HighVAF.pdf"),
+  p3,
+  width = 12, height = 10, dpi = 300
+)
+ggsave(
+  file.path(output_dir, "Fig3_VAF_vs_GenomicPos_HighVAF.png"),
+  p3,
+  width = 12, height = 10, dpi = 300
+)
+cat("✓ Figure 3 saved\n\n")
+
+# ============================================================================
+# 7) SMOOTH LOESS CURVES
+# ============================================================================
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("GENERATING FIGURE 4: LOESS-SMOOTHED TRENDS\n")
+cat("═══════════════════════════════════════════════════════════════════════\n")
+
+smooth_data <- vaf_plot %>%
+  group_by(data_type) %>%
+  slice_sample(n = 10000) %>%
+  ungroup()
+
+p4 <- ggplot(smooth_data, aes(x = genomic_pos / 1e9,
+                              y = vaf/100,
+                              color = data_type,
+                              fill = data_type)) +
+  geom_smooth(
+    method = "loess",
+    se = TRUE,
+    linewidth = 1.2,
+    alpha = 0.15
+  ) +
+  facet_wrap(~data_type, scales = "free_x", ncol = 1) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(
+    x = "Genomic Position (Gb)",
+    y = "VAF",
+    color = "Data Type",
+    fill = "Data Type",
+    title = "LOESS-Smoothed VAF Trends Across Genome",
+    subtitle = "Shaded region = 95% confidence interval"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(face = "bold", size = 11),
+    legend.position = "bottom",
+    plot.title = element_text(size = 13, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40")
+  )
+
+ggsave(
+  file.path(output_dir, "Fig4_LOESS_Smoothed_Trends.pdf"),
+  p4,
+  width = 12, height = 10, dpi = 300
+)
+ggsave(
+  file.path(output_dir, "Fig4_LOESS_Smoothed_Trends.png"),
+  p4,
+  width = 12, height = 10, dpi = 300
+)
+cat("✓ Figure 4 saved\n\n")
+
+# ============================================================================
+# 8) BINNED TRENDS (GENOMIC BINS)
+# ============================================================================
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("GENERATING FIGURE 5: BINNED MEAN VAF BY GENOMIC REGION\n")
+cat("═══════════════════════════════════════════════════════════════════════\n")
+
+n_genomic_bins <- 200
+
+trend_data <- vaf_plot %>%
+  mutate(vaf_ratio = vaf/100) %>%
+  group_by(
+    data_type,
+    bin = cut(genomic_pos, breaks = n_genomic_bins)
+  ) %>%
+  summarise(
+    genomic_pos = mean(genomic_pos, na.rm = TRUE),
+    mean_vaf = mean(vaf_ratio, na.rm = TRUE),
+    sd_vaf = sd(vaf_ratio, na.rm = TRUE),
+    n_variants = n(),
+    .groups = "drop"
+  )
+
+p5 <- ggplot(trend_data,
+             aes(x = genomic_pos / 1e9, y = mean_vaf, color = data_type)) +
+  geom_line(linewidth = 1.1, alpha = 0.8) +
+  geom_point(size = 2, alpha = 0.6) +
+  facet_wrap(~data_type, scales = "free_x", ncol = 1) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(
+    x = "Genomic Position (Gb)",
+    y = "Mean VAF",
+    color = "Data Type",
+    title = "Mean VAF Across Genomic Bins",
+    subtitle = paste0(n_genomic_bins, " equal-width bins across genome")
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(face = "bold", size = 11),
+    legend.position = "bottom",
+    plot.title = element_text(size = 13, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40")
+  )
+
+ggsave(
+  file.path(output_dir, "Fig5_Binned_Mean_VAF.pdf"),
+  p5,
+  width = 12, height = 10, dpi = 300
+)
+ggsave(
+  file.path(output_dir, "Fig5_Binned_Mean_VAF.png"),
+  p5,
+  width = 12, height = 10, dpi = 300
+)
+cat("✓ Figure 5 saved\n\n")
+
+# ============================================================================
+# 9) STATISTICAL TEST: GENOMIC BINS (X-AXIS)
+# ============================================================================
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("STATISTICAL ANALYSIS: KRUSKAL-WALLIS TEST BY GENOMIC BIN\n")
+cat("═══════════════════════════════════════════════════════════════════════\n")
+
+vaf_binned_genomic <- vaf_plot %>%
+  mutate(bin = cut(genomic_pos, breaks = n_genomic_bins))
+
+bin_tests_genomic <- vaf_binned_genomic %>%
+  group_by(bin) %>%
+  filter(n_distinct(data_type) > 1) %>%
+  summarise(
+    kruskal_p = kruskal.test(vaf / 100 ~ data_type)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_adj = p.adjust(kruskal_p, method = "fdr"),
+    significant = p_adj < 0.05
+  )
+
+significant_bins_genomic <- bin_tests_genomic %>%
+  filter(significant)
+
+cat("Total genomic bins tested:", nrow(bin_tests_genomic), "\n")
+cat("Significant bins (FDR-adjusted, α=0.05):", nrow(significant_bins_genomic), "\n")
+cat("Proportion significant:", 
+    round(nrow(significant_bins_genomic) / nrow(bin_tests_genomic) * 100, 2), "%\n\n")
+
+# Save summary
+sink(file.path(output_dir, "Table1_Kruskal_Summary_Genomic_Bins.txt"))
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("KRUSKAL-WALLIS TEST SUMMARY: GENOMIC BINS\n")
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("Null hypothesis: VAF distributions are equal across data types (BM, Illumina, Ultima)\n")
+cat("Alternative hypothesis: At least one data type has different VAF distribution\n\n")
+cat("Total bins:", nrow(bin_tests_genomic), "\n")
+cat("Significant bins (FDR p < 0.05):", nrow(significant_bins_genomic), "\n")
+cat("Proportion:", round(nrow(significant_bins_genomic) / nrow(bin_tests_genomic) * 100, 2), "%\n\n")
+cat("Interpretation:\n")
+cat("  - High proportion of significant bins (>50%) suggests substantial platform differences\n")
+cat("  - Low proportion (<20%) suggests platforms are largely similar\n")
+cat("  - Moderate proportion (20-50%) suggests platform-specific biases in certain regions\n\n")
+cat("\nFirst 10 significant bins:\n")
+print(head(significant_bins_genomic, 10))
+sink()
+
+# ============================================================================
+# 10) PLOTTING SIGNIFICANT GENOMIC BINS
+# ============================================================================
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("GENERATING FIGURE 6: SIGNIFICANT GENOMIC REGIONS HIGHLIGHTED\n")
+cat("═══════════════════════════════════════════════════════════════════════\n")
+
+sig_regions_genomic <- significant_bins_genomic %>%
+  left_join(
+    vaf_binned_genomic %>%
+      group_by(bin) %>%
+      summarise(
+        xmin = min(genomic_pos, na.rm = TRUE),
+        xmax = max(genomic_pos, na.rm = TRUE),
+        .groups = "drop"
+      ),
+    by = "bin"
+  )
+
+vaf_bin_summary_genomic <- vaf_binned_genomic %>%
+  group_by(bin, data_type) %>%
+  summarise(
+    bin_mid = mean(genomic_pos, na.rm = TRUE),
+    median_vaf = median(vaf, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+p6 <- ggplot(vaf_bin_summary_genomic,
+             aes(x = bin_mid / 1e9, y = median_vaf/100, color = data_type)) +
+  geom_rect(
+    data = sig_regions_genomic,
+    aes(xmin = xmin / 1e9, xmax = xmax / 1e9, ymin = -Inf, ymax = Inf),
+    inherit.aes = FALSE,
+    fill = "red",
+    alpha = 0.15
+  ) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.5) +
+  facet_wrap(~data_type, scales = "free_x", ncol = 1) +
+  labs(
+    x = "Genomic Position (Gb)",
+    y = "Median VAF",
+    color = "Data Type",
+    title = "Median VAF with Significant Regions Highlighted",
+    subtitle = "Red bands = regions with significant platform differences (Kruskal-Wallis, FDR p < 0.05)"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(face = "bold", size = 11),
+    legend.position = "bottom",
+    panel.grid = element_blank(),
+    plot.title = element_text(size = 13, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40")
+  )
+
+ggsave(
+  file.path(output_dir, "Fig6_Significant_Regions_Highlighted.pdf"),
+  p6,
+  width = 12, height = 10, dpi = 300
+)
+ggsave(
+  file.path(output_dir, "Fig6_Significant_Regions_Highlighted.png"),
+  p6,
+  width = 12, height = 10, dpi = 300
+)
+cat("✓ Figure 6 saved\n\n")
+
+# ============================================================================
+# 11) PLATFORM SIMILARITY: GENOMIC BINS
+# ============================================================================
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("PLATFORM SIMILARITY ANALYSIS: WHICH PLATFORM IS CLOSEST TO BM?\n")
+cat("═══════════════════════════════════════════════════════════════════════\n")
+
+genomic_similarity <- vaf_binned_genomic %>%
+  group_by(bin) %>%
+  filter(n_distinct(data_type) >= 3) %>%
+  summarise(
+    ks_bm_illumina = ks.test(
+      vaf[data_type == "BM"],
+      vaf[data_type == "Illumina_cfDNA"]
+    )$statistic,
+    ks_bm_ultima = ks.test(
+      vaf[data_type == "BM"],
+      vaf[data_type == "Ultima_cfDNA"]
+    )$statistic,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    closer_to_bm = ifelse(
+      ks_bm_illumina < ks_bm_ultima,
+      "Illumina_cfDNA",
+      "Ultima_cfDNA"
+    ),
+    ks_diff = ks_bm_illumina - ks_bm_ultima
+  )
+
+similarity_summary <- genomic_similarity %>%
+  count(closer_to_bm) %>%
+  mutate(
+    prop = n / sum(n),
+    pct = round(prop * 100, 1)
+  )
+
+cat("\n--- GENOMIC BIN SIMILARITY ---\n")
+cat("Which platform's VAF distribution is closer to BM?\n\n")
+print(similarity_summary)
+
+cat("\nMedian KS distances (Genomic bins):\n")
+cat("  Illumina vs. BM: ", round(median(genomic_similarity$ks_bm_illumina, na.rm = TRUE), 4), "\n")
+cat("  Ultima vs. BM:   ", round(median(genomic_similarity$ks_bm_ultima, na.rm = TRUE), 4), "\n")
+
+# Save results
+sink(file.path(output_dir, "Table2_Platform_Similarity_Genomic.txt"), append = FALSE)
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("PLATFORM SIMILARITY: WHICH CFDATA PLATFORM MATCHES BM BEST?\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+cat("Method: Kolmogorov-Smirnov (KS) test comparing VAF distributions\n")
+cat("KS statistic: 0 = identical distributions, 1 = maximally different\n")
+cat("Lower KS = more similar to BM\n\n")
+cat("Results by genomic bin:\n")
+print(similarity_summary)
+cat("\n")
+cat("Platform breakdown:\n")
+cat("  Illumina closer to BM: ", similarity_summary$n[similarity_summary$closer_to_bm == "Illumina_cfDNA"], 
+    " bins (", similarity_summary$pct[similarity_summary$closer_to_bm == "Illumina_cfDNA"], "%)\n")
+cat("  Ultima closer to BM:   ", similarity_summary$n[similarity_summary$closer_to_bm == "Ultima_cfDNA"], 
+    " bins (", similarity_summary$pct[similarity_summary$closer_to_bm == "Ultima_cfDNA"], "%)\n\n")
+cat("Median KS distances:\n")
+cat("  Illumina vs. BM: ", round(median(genomic_similarity$ks_bm_illumina, na.rm = TRUE), 4), "\n")
+cat("  Ultima vs. BM:   ", round(median(genomic_similarity$ks_bm_ultima, na.rm = TRUE), 4), "\n\n")
+cat("Interpretation:\n")
+if (similarity_summary$pct[similarity_summary$closer_to_bm == "Illumina_cfDNA"] > 50) {
+  cat("  ✓ ILLUMINA cfDNA more closely matches BM across the genome\n")
+} else {
+  cat("  ✓ ULTIMA cfDNA more closely matches BM across the genome\n")
+}
+sink()
+
+# ============================================================================
+# 12) STATISTICAL TEST: WILCOXON (PAIRED COMPARISON)
+# ============================================================================
+cat("\n═══════════════════════════════════════════════════════════════════════\n")
+cat("WILCOXON PAIRED TEST: ILLUMINA vs. ULTIMA vs. BM\n")
+cat("═══════════════════════════════════════════════════════════════════════\n")
+
+wilcox_result <- wilcox.test(
+  genomic_similarity$ks_bm_illumina,
+  genomic_similarity$ks_bm_ultima,
+  paired = TRUE
+)
+
+cat("\nNull hypothesis: No systematic difference in KS distances (both platforms equally similar to BM)\n")
+cat("Alternative hypothesis: One platform is systematically closer to BM than the other\n\n")
+print(wilcox_result)
+
+# Save Wilcoxon results
+sink(file.path(output_dir, "Table3_Wilcoxon_Test_Results.txt"), append = FALSE)
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("WILCOXON PAIRED SIGNED-RANK TEST\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+cat("Comparing KS distances across genomic bins:\n")
+cat("  H0: KS(BM-Illumina) = KS(BM-Ultima) [no difference]\n")
+cat("  H1: KS(BM-Illumina) ≠ KS(BM-Ultima) [systematic difference]\n\n")
+print(wilcox_result)
+cat("\n")
+if (wilcox_result$p.value < 0.05) {
+  cat("✓ SIGNIFICANT (p < 0.05): One platform is significantly closer to BM than the other\n")
+} else {
+  cat("✗ NOT SIGNIFICANT (p ≥ 0.05): No significant difference between platforms\n")
+}
+cat("\nEstimated effect size (median KS difference):\n")
+cat("  Median[KS(BM-Illumina) - KS(BM-Ultima)] = ",
+    round(median(genomic_similarity$ks_diff, na.rm = TRUE), 4), "\n")
+if (median(genomic_similarity$ks_diff, na.rm = TRUE) < 0) {
+  cat("  → Negative value: Illumina is closer to BM on average\n")
+} else {
+  cat("  → Positive value: Ultima is closer to BM on average\n")
+}
+sink()
+
+# ============================================================================
+# 13) PLATFORM SIMILARITY PLOTS
+# ============================================================================
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("GENERATING FIGURE 7: PLATFORM SIMILARITY COMPARISON\n")
+cat("═══════════════════════════════════════════════════════════════════════\n")
+
+p7 <- ggplot(genomic_similarity, 
+             aes(x = 1:nrow(genomic_similarity), 
+                 y = ks_diff)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red", size = 1) +
+  geom_point(aes(color = closer_to_bm), size = 2, alpha = 0.7) +
+  geom_segment(aes(x = 1:nrow(genomic_similarity), xend = 1:nrow(genomic_similarity), 
+                   y = 0, yend = ks_diff, color = closer_to_bm), alpha = 0.4) +
+  scale_color_manual(
+    values = c("Illumina_cfDNA" = "#0072B2", "Ultima_cfDNA" = "#D55E00"),
+    labels = c("Illumina_cfDNA" = "Illumina Closer", "Ultima_cfDNA" = "Ultima Closer")
+  ) +
+  labs(
+    x = "Genomic Bin",
+    y = "KS(BM-Illumina) - KS(BM-Ultima)",
+    color = "Closer to BM",
+    title = "Platform Similarity Comparison Across Genomic Bins",
+    subtitle = "Negative = Illumina closer; Positive = Ultima closer"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 13, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40")
+  )
+
+ggsave(
+  file.path(output_dir, "Fig7_Platform_Similarity_Comparison.pdf"),
+  p7,
+  width = 12, height = 6, dpi = 300
+)
+ggsave(
+  file.path(output_dir, "Fig7_Platform_Similarity_Comparison.png"),
+  p7,
+  width = 12, height = 6, dpi = 300
+)
+cat("✓ Figure 7 saved\n\n")
+
+# ============================================================================
+# 14) VAF-STRATIFIED ANALYSIS
+# ============================================================================
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("VAF-STRATIFIED ANALYSIS: SUBCLONAL vs. CLONAL VARIANTS\n")
+cat("═══════════════════════════════════════════════════════════════════════\n")
+
+vaf_binned_y <- vaf_plot %>%
+  mutate(
+    vaf_frac = vaf / 100,
+    vaf_bin = cut(
+      vaf_frac,
+      breaks = seq(0, 1, by = 0.1),
+      include.lowest = TRUE
+    )
+  )
+
+vaf_bin_tests <- vaf_binned_y %>%
+  group_by(vaf_bin) %>%
+  filter(n_distinct(data_type) > 1) %>%
+  summarise(
+    kruskal_p = kruskal.test(genomic_pos ~ data_type)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_adj = p.adjust(kruskal_p, method = "fdr"),
+    significant = p_adj < 0.05
+  )
+
+significant_vaf_bins <- vaf_bin_tests %>%
+  filter(significant)
+
+cat("Total VAF bins tested:", nrow(vaf_bin_tests), "\n")
+cat("Significant VAF bins (FDR-adjusted, α=0.05):", nrow(significant_vaf_bins), "\n\n")
+
+# Save summary
+sink(file.path(output_dir, "Table4_VAF_Bin_Analysis.txt"))
+
+# ============================================================================
+# 14b) PLATFORM SIMILARITY ACROSS VAF RANGES
+# ============================================================================
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("PLATFORM SIMILARITY ACROSS VAF RANGES\n")
+cat("═══════════════════════════════════════════════════════════════════════\n")
+
+vaf_similarity <- vaf_binned_y %>%
+  group_by(vaf_bin) %>%
+  filter(n_distinct(data_type) >= 3) %>%
+  summarise(
+    ks_bm_illumina = ks.test(
+      vaf[data_type == "BM"],
+      vaf[data_type == "Illumina_cfDNA"]
+    )$statistic,
+    ks_bm_ultima = ks.test(
+      vaf[data_type == "BM"],
+      vaf[data_type == "Ultima_cfDNA"]
+    )$statistic,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    closer_to_bm = ifelse(
+      ks_bm_illumina < ks_bm_ultima,
+      "Illumina_cfDNA",
+      "Ultima_cfDNA"
+    ),
+    ks_diff = ks_bm_illumina - ks_bm_ultima
+  )
+
+vaf_sim_summary <- vaf_similarity %>%
+  count(closer_to_bm) %>%
+  mutate(
+    prop = n / sum(n),
+    pct = round(prop * 100, 1)
+  )
+
+cat("Which platform's VAF distribution is closer to BM within each VAF range?\n\n")
+print(vaf_sim_summary)
+
+cat("\nMedian KS distances (VAF ranges):\n")
+cat("  Illumina vs. BM: ", round(median(vaf_similarity$ks_bm_illumina, na.rm = TRUE), 4), "\n")
+cat("  Ultima vs. BM:   ", round(median(vaf_similarity$ks_bm_ultima, na.rm = TRUE), 4), "\n\n")
+
+# Wilcoxon test for VAF similarity
+wilcox_vaf_result <- wilcox.test(
+  vaf_similarity$ks_bm_illumina,
+  vaf_similarity$ks_bm_ultima,
+  paired = TRUE
+)
+
+cat("Wilcoxon paired test (VAF ranges): p = ", round(wilcox_vaf_result$p.value, 4), "\n\n")
+
+# Save VAF platform similarity results
+sink(file.path(output_dir, "Table4b_Platform_Similarity_VAF_Ranges.txt"))
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("PLATFORM SIMILARITY ACROSS VAF RANGES\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+cat("Method: Kolmogorov-Smirnov (KS) test comparing VAF distributions\n")
+cat("KS statistic: 0 = identical distributions, 1 = maximally different\n")
+cat("Lower KS = more similar to BM\n\n")
+cat("Results by VAF bin:\n")
+print(vaf_sim_summary)
+cat("\n")
+cat("Platform breakdown:\n")
+cat("  Illumina closer to BM: ", vaf_sim_summary$n[vaf_sim_summary$closer_to_bm == "Illumina_cfDNA"], 
+    " VAF ranges (", vaf_sim_summary$pct[vaf_sim_summary$closer_to_bm == "Illumina_cfDNA"], "%)\n")
+cat("  Ultima closer to BM:   ", vaf_sim_summary$n[vaf_sim_summary$closer_to_bm == "Ultima_cfDNA"], 
+    " VAF ranges (", vaf_sim_summary$pct[vaf_sim_summary$closer_to_bm == "Ultima_cfDNA"], "%)\n\n")
+cat("Median KS distances:\n")
+cat("  Illumina vs. BM: ", round(median(vaf_similarity$ks_bm_illumina, na.rm = TRUE), 4), "\n")
+cat("  Ultima vs. BM:   ", round(median(vaf_similarity$ks_bm_ultima, na.rm = TRUE), 4), "\n\n")
+cat("Wilcoxon paired test: p = ", round(wilcox_vaf_result$p.value, 4), "\n")
+if (wilcox_vaf_result$p.value < 0.05) {
+  cat("Result: SIGNIFICANT (p < 0.05) - One platform is significantly closer to BM\n")
+} else {
+  cat("Result: NOT SIGNIFICANT (p ≥ 0.05) - No significant difference\n")
+}
+cat("\nInterpretation:\n")
+if (vaf_sim_summary$pct[vaf_sim_summary$closer_to_bm == "Illumina_cfDNA"] > 50) {
+  cat("  ✓ ILLUMINA cfDNA more closely matches BM across VAF ranges\n")
+} else {
+  cat("  ✓ ULTIMA cfDNA more closely matches BM across VAF ranges\n")
+}
+sink()
+
+# ============================================================================
+# 14c) PLOT: PLATFORM SIMILARITY ACROSS VAF RANGES
+# ============================================================================
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("GENERATING FIGURE 8: PLATFORM SIMILARITY ACROSS VAF RANGES\n")
+cat("═══════════════════════════════════════════════════════════════════════\n")
+
+p8 <- ggplot(vaf_similarity, 
+             aes(x = as.numeric(factor(vaf_bin)), 
+                 y = ks_diff)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red", size = 1) +
+  geom_point(aes(color = closer_to_bm), size = 3, alpha = 0.8) +
+  geom_segment(aes(x = as.numeric(factor(vaf_bin)), 
+                   xend = as.numeric(factor(vaf_bin)), 
+                   y = 0, yend = ks_diff, color = closer_to_bm), 
+               alpha = 0.5, linewidth = 1) +
+  scale_color_manual(
+    values = c("Illumina_cfDNA" = "#0072B2", "Ultima_cfDNA" = "#D55E00"),
+    labels = c("Illumina_cfDNA" = "Illumina Closer", "Ultima_cfDNA" = "Ultima Closer")
+  ) +
+  scale_x_continuous(
+    breaks = 1:10,
+    labels = c("0-0.1", "0.1-0.2", "0.2-0.3", "0.3-0.4", "0.4-0.5", 
+               "0.5-0.6", "0.6-0.7", "0.7-0.8", "0.8-0.9", "0.9-1.0")
+  ) +
+  labs(
+    x = "VAF Range",
+    y = "KS(BM-Illumina) - KS(BM-Ultima)",
+    color = "Closer to BM",
+    title = "Platform Similarity Across VAF Ranges",
+    subtitle = "Negative = Illumina closer; Positive = Ultima closer"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(size = 13, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40")
+  )
+
+ggsave(
+  file.path(output_dir, "Fig8_Platform_Similarity_VAF_Ranges.pdf"),
+  p8,
+  width = 12, height = 6, dpi = 300
+)
+ggsave(
+  file.path(output_dir, "Fig8_Platform_Similarity_VAF_Ranges.png"),
+  p8,
+  width = 12, height = 6, dpi = 300
+)
+cat("✓ Figure 8 saved\n\n")
+
+# ============================================================================
+# 15) SUMMARY STATISTICS TABLE
+# ============================================================================
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("SUMMARY STATISTICS\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+summary_stats <- vaf_plot %>%
+  group_by(data_type) %>%
+  summarise(
+    n_variants = n(),
+    mean_vaf = round(mean(vaf/100, na.rm = TRUE), 4),
+    median_vaf = round(median(vaf/100, na.rm = TRUE), 4),
+    sd_vaf = round(sd(vaf/100, na.rm = TRUE), 4),
+    min_vaf = round(min(vaf/100, na.rm = TRUE), 4),
+    max_vaf = round(max(vaf/100, na.rm = TRUE), 4),
+    q25_vaf = round(quantile(vaf/100, 0.25, na.rm = TRUE), 4),
+    q75_vaf = round(quantile(vaf/100, 0.75, na.rm = TRUE), 4),
+    .groups = "drop"
+  )
+
+print(summary_stats)
+
+sink(file.path(output_dir, "Table5_Summary_Statistics.txt"))
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("SUMMARY STATISTICS: VAF DISTRIBUTIONS BY DATA TYPE\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+print(summary_stats)
+sink()
+
+# ============================================================================
+# 16) GENERATE FINAL SUMMARY REPORT
+# ============================================================================
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("GENERATING FINAL SUMMARY REPORT\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+sink(file.path(output_dir, "FINAL_SUMMARY_REPORT.txt"))
+cat("╔═══════════════════════════════════════════════════════════════════════╗\n")
+cat("║         VAF ANALYSIS REPORT: PLATFORM COMPARISON TO BONE MARROW      ║\n")
+cat("╚═══════════════════════════════════════════════════════════════════════╝\n\n")
+
+cat("OBJECTIVE:\n")
+cat("  Assess which cell-free DNA (cfDNA) sequencing platform (Illumina vs.\n")
+cat("  Ultima) more closely recapitulates VAF distributions observed in bone\n")
+cat("  marrow (BM) whole-genome sequencing across the genome.\n\n")
+
+cat("METHODS:\n")
+cat("  • Variants binned by genomic position (", n_genomic_bins, " equal-width bins)\n")
+cat("  • VAF compared across data types using Kruskal-Wallis test (α=0.05, FDR-corrected)\n")
+cat("  • Platform similarity assessed via Kolmogorov-Smirnov (KS) test\n")
+cat("  • Paired Wilcoxon test to determine if one platform is systematically closer to BM\n\n")
+
+cat("KEY FINDINGS:\n\n")
+
+cat("1. GENOMIC BIN ANALYSIS (Primary):\n")
+cat("   ", nrow(bin_tests_genomic), " genomic bins tested\n")
+cat("   ", nrow(significant_bins_genomic), " bins with significant platform differences\n")
+cat("   ", round(nrow(significant_bins_genomic)/nrow(bin_tests_genomic)*100, 1), "% of genome shows significant differences\n\n")
+
+cat("2. PLATFORM SIMILARITY:\n")
+if (similarity_summary$pct[similarity_summary$closer_to_bm == "Illumina_cfDNA"] > 50) {
+  cat("   ✓ ILLUMINA cfDNA is closer to BM in ",
+      similarity_summary$n[similarity_summary$closer_to_bm == "Illumina_cfDNA"], 
+      " bins (",
+      similarity_summary$pct[similarity_summary$closer_to_bm == "Illumina_cfDNA"], "%)\n")
+  cat("   ✗ Ultima cfDNA is closer to BM in ",
+      similarity_summary$n[similarity_summary$closer_to_bm == "Ultima_cfDNA"], 
+      " bins (",
+      similarity_summary$pct[similarity_summary$closer_to_bm == "Ultima_cfDNA"], "%)\n\n")
+  cat("   Median KS distances:\n")
+  cat("     Illumina vs. BM: ", round(median(genomic_similarity$ks_bm_illumina, na.rm = TRUE), 4), "\n")
+  cat("     Ultima vs. BM:   ", round(median(genomic_similarity$ks_bm_ultima, na.rm = TRUE), 4), "\n\n")
+  cat("   CONCLUSION: Illumina cfDNA better matches BM VAF distributions\n")
+} else {
+  cat("   ✓ ULTIMA cfDNA is closer to BM in ",
+      similarity_summary$n[similarity_summary$closer_to_bm == "Ultima_cfDNA"], 
+      " bins (",
+      similarity_summary$pct[similarity_summary$closer_to_bm == "Ultima_cfDNA"], "%)\n")
+  cat("   ✗ Illumina cfDNA is closer to BM in ",
+      similarity_summary$n[similarity_summary$closer_to_bm == "Illumina_cfDNA"], 
+      " bins (",
+      similarity_summary$pct[similarity_summary$closer_to_bm == "Illumina_cfDNA"], "%)\n\n")
+  cat("   Median KS distances:\n")
+  cat("     Illumina vs. BM: ", round(median(genomic_similarity$ks_bm_illumina, na.rm = TRUE), 4), "\n")
+  cat("     Ultima vs. BM:   ", round(median(genomic_similarity$ks_bm_ultima, na.rm = TRUE), 4), "\n\n")
+  cat("   CONCLUSION: Ultima cfDNA better matches BM VAF distributions\n")
+}
+
+cat("\n3. STATISTICAL SIGNIFICANCE (Wilcoxon paired test):\n")
+cat("   V = ", wilcox_result$statistic, "\n")
+cat("   p-value = ", round(wilcox_result$p.value, 4), "\n")
+if (wilcox_result$p.value < 0.05) {
+  cat("   Result: SIGNIFICANT (p < 0.05)\n")
+  cat("   → One platform is significantly closer to BM than the other\n")
+} else {
+  cat("   Result: NOT SIGNIFICANT (p ≥ 0.05)\n")
+  cat("   → No significant difference in similarity to BM\n")
+}
+
+cat("\n4. VAF-STRATIFIED ANALYSIS:\n")
+cat("   ", nrow(significant_vaf_bins), " out of ", nrow(vaf_bin_tests), 
+    " VAF bins show significant differences\n")
+cat("   → Suggests platform differences vary across VAF ranges\n\n")
+
+cat("INTERPRETATION:\n")
+cat("  The analysis reveals ", 
+    if_else(nrow(significant_bins_genomic) > nrow(bin_tests_genomic)*0.3, 
+            "substantial", "modest"), 
+    " platform-specific differences in VAF\n")
+cat("  distributions across the genome. ",
+    if (similarity_summary$pct[similarity_summary$closer_to_bm == "Illumina_cfDNA"] > 50) {
+      "Illumina cfDNA more consistently matches"
+    } else {
+      "Ultima cfDNA more consistently matches"
+    }, 
+    " BM, suggesting\n")
+cat("  that this platform provides a more faithful representation of clonal\n")
+cat("  and subclonal architecture in multiple myeloma.\n\n")
+
+cat("CAVEATS:\n")
+cat("  • Analysis limited to sampled variants (10,000 per sample/type)\n")
+cat("  • Bin size choice may affect results\n")
+cat("  • Multiple testing correction (FDR) applied to account for multiple comparisons\n\n")
+
+cat("FILES GENERATED:\n")
+cat("  Figures (PDF & PNG):\n")
+cat("    - Fig1: VAF vs. Genomic Position (all ranges)\n")
+cat("    - Fig2: VAF vs. Genomic Position (VAF < 0.5, subclonal)\n")
+cat("    - Fig3: VAF vs. Genomic Position (VAF > 0.5, clonal)\n")
+cat("    - Fig4: LOESS-smoothed trends\n")
+cat("    - Fig5: Binned mean VAF by genomic region\n")
+cat("    - Fig6: Significant regions highlighted\n")
+cat("    - Fig7: Platform similarity comparison\n\n")
+cat("  Tables (TXT):\n")
+cat("    - Table1: Kruskal-Wallis test summary (genomic bins)\n")
+cat("    - Table2: Platform similarity summary\n")
+cat("    - Table3: Wilcoxon test results\n")
+cat("    - Table4: VAF-stratified analysis\n")
+cat("    - Table5: Summary statistics\n\n")
+
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("Report generated:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
+cat("═══════════════════════════════════════════════════════════════════════\n")
+
+sink()
+
+cat("✓ Final summary report saved\n\n")
+
+# ============================================================================
+# 17) PRINT FINAL OUTPUT
+# ============================================================================
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("ANALYSIS COMPLETE!\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+cat("Output directory:", output_dir, "\n\n")
+cat("Generated files:\n")
+cat("  ✓ 7 Figures (PDF + PNG)\n")
+cat("  ✓ 5 Summary Tables (TXT)\n")
+cat("  ✓ 1 Final Summary Report (TXT)\n\n")
+cat("All files ready for publication!\n")
+
+```
+
+```{r}
+# Add this chunk AFTER the low VAF visualization code above
+# Frequency distribution analysis: Bins of occurrence counts
+
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+# Bin the frequencies into ranges (e.g., 0-10, 11-50, 51-100, etc.)
+vaf_agg_binned <- vaf_agg %>%
+  mutate(
+    freq_bin = cut(n_variants,
+                   breaks = c(0, 10, 50, 100, 500, Inf),
+                   labels = c("1-10", "11-50", "51-100", "101-500", "501+"),
+                   include.lowest = TRUE),
+    freq_bin = factor(freq_bin, levels = c("1-10", "11-50", "51-100", "101-500", "501+"))
+  ) %>%
+  filter(!is.na(freq_bin)) %>%
+  count(data_type, freq_bin, name = "n_positions") %>%
+  # Calculate percentages
+  group_by(data_type) %>%
+  mutate(pct_positions = n_positions / sum(n_positions) * 100) %>%
+  ungroup()
+
+print(vaf_agg_binned)
+
+# Save detailed table
+write.table(vaf_agg_binned, 
+            file.path(output_dir, "Table6_Frequency_Bin_Summary.txt"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
+
+# Plot 1: Stacked bar - positions per frequency bin
+p_freq1 <- ggplot(vaf_agg_binned, aes(x = freq_bin, y = n_positions, fill = data_type)) +
+  geom_bar(stat = "identity", position = "stack") +
+  scale_fill_manual(values = c("BM" = "black", 
+                              "Illumina_cfDNA" = "#0072B2", 
+                              "Ultima_cfDNA" = "#D55E00")) +
+  labs(
+    x = "Frequency Bin (# variants per genomic position)",
+    y = "# Genomic Positions",
+    fill = "Data Type",
+    title = "Low VAF: Positions by Frequency Range (Stacked)"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")
+
+print(p_freq1)
+ggsave(file.path(output_dir, "Fig11_FreqBins_Stacked_Counts.pdf"), 
+       p_freq1, width = 10, height = 7, dpi = 300)
+
+# Plot 2: Grouped bars - percentages for easy comparison
+p_freq2 <- ggplot(vaf_agg_binned, aes(x = freq_bin, y = pct_positions, fill = data_type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(values = c("BM" = "black", 
+                              "Illumina_cfDNA" = "#0072B2", 
+                              "Ultima_cfDNA" = "#D55E00")) +
+  scale_y_continuous(labels = percent_format(scale = 1)) +
+  labs(
+    x = "Frequency Bin (# variants per position)",
+    y = "% of All Positions",
+    fill = "Data Type",
+    title = "Low VAF: % Positions per Frequency Range",
+    subtitle = "e.g., BM has more 1-10 freq positions than Ultima"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")
+
+print(p_freq2)
+ggsave(file.path(output_dir, "Fig12_FreqBins_Percentages.pdf"), 
+       p_freq2, width = 10, height = 7, dpi = 300)
+
+# Plot 3: Heatmap style for publication
+p_freq3 <- ggplot(vaf_agg_binned, aes(x = freq_bin, y = data_type, 
+                                      fill = pct_positions)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_text(aes(label = sprintf("%.1f%% (%d)", pct_positions, n_positions)), 
+            color = "white", fontface = "bold") +
+  scale_fill_viridis_c(name = "% Positions", labels = percent_format(scale = 1)) +
+  labs(
+    x = "Frequency Bin (# variants per position)",
+    y = "Data Type",
+    title = "Low VAF Frequency Distribution Heatmap",
+    subtitle = "Tile size/color = % positions; Text = % (count)"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "right")
+
+print(p_freq3)
+ggsave(file.path(output_dir, "Fig13_FreqBins_Heatmap.pdf"), 
+       p_freq3, width = 10, height = 6, dpi = 300)
+
+cat("✓ Frequency bin analysis complete!\n")
+cat("  - Table6: Raw counts + % by bin/data_type\n")
+cat("  - Fig11: Stacked absolute counts\n") 
+cat("  - Fig12: Dodged percentages (easy comparison)\n")
+cat("  - Fig13: Heatmap (publication-ready)\n")
+
+
+#### Smaller bins
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+vaf_agg_binned <- vaf_agg %>%
+  mutate(
+    freq_bin = case_when(
+      n_variants == 1               ~ "1",
+      between(n_variants, 2, 4)     ~ "2-4",
+      between(n_variants, 5, 6)     ~ "5-6",
+      between(n_variants, 7, 8)     ~ "7-8",
+      n_variants >= 9               ~ "9+",
+      TRUE                          ~ NA_character_
+    ),
+    freq_bin = factor(freq_bin, levels = c("1", "2-4", "5-6", "7-8", "9+"))
+  ) %>%
+  filter(!is.na(freq_bin)) %>%
+  count(data_type, freq_bin, name = "n_positions") %>%
+  group_by(data_type) %>%
+  mutate(pct_positions = n_positions / sum(n_positions) * 100) %>%
+  ungroup()
+
+print(vaf_agg_binned)
+
+write.table(
+  vaf_agg_binned,
+  file.path(output_dir, "Table6_Frequency_Bin_Summary_2to4.txt"),
+  sep = "\t", quote = FALSE, row.names = FALSE
+)
+
+# (Optional) same plots as before; just reuse vaf_agg_binned
+p_freq2 <- ggplot(vaf_agg_binned, aes(x = freq_bin, y = pct_positions, fill = data_type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(values = c("BM" = "black",
+                              "Illumina_cfDNA" = "#0072B2",
+                              "Ultima_cfDNA" = "#D55E00")) +
+  scale_y_continuous(labels = percent_format(scale = 1)) +
+  labs(x = "Frequency bin (# variants per position)",
+       y = "% of positions",
+       fill = "Data type",
+       title = "Positions per frequency bin (2–4 grouped)") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")
+
+print(p_freq2)
+ggsave(file.path(output_dir, "Fig_FreqBins_2to4_Grouped_Percentages.pdf"),
+       p_freq2, width = 10, height = 7, dpi = 300)
+ggsave(file.path(output_dir, "Fig_FreqBins_2to4_Grouped_Percentages.png"),
+       p_freq2, width = 10, height = 7, dpi = 300)
+
+```
+
+```{r}
+# ============================================================================
+# TOP VARIANTS ANALYSIS: FIXED VERSION
+# Properly annotates hg38 with correct chromosome format
+# ============================================================================
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(biomaRt)
+
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("STEP 1: IDENTIFY TOP 2 n_variants VALUES FOR EACH DATA TYPE\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+# Get top 2 unique n_variants values PER data_type
+library(dplyr)
+
+top_nvals <- vaf_agg %>%
+  group_by(data_type) %>%
+  distinct(n_variants) %>%
+  slice_max(n_variants, n = 2) %>%
+  ungroup()
+
+top_positions <- vaf_agg %>%
+  semi_join(top_nvals, by = c("data_type", "n_variants")) %>%
+  arrange(data_type, desc(n_variants), genomic_pos)
+
+cat("Total positions with top 2 variant counts:\n")
+print(top_positions %>% count(data_type, n_variants))
+cat("\nTotal rows:", nrow(top_positions), "\n\n")
+
+# Rest of code stays EXACTLY the same (STEP 2 onwards)
+
+
+cat("\n═══════════════════════════════════════════════════════════════════════\n")
+cat("STEP 2: CONVERT genomic_pos → chr:pos (hg38)\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+# Convert genomic_pos back to chromosome and position
+top_positions_converted <- top_positions %>%
+  mutate(
+    chr_num = floor(genomic_pos / 250e6) + 1,
+    pos = genomic_pos - (chr_num - 1) * 250e6,
+    chr_name = case_when(
+      chr_num == 23 ~ "X",
+      chr_num == 24 ~ "Y",
+      chr_num == 25 ~ "MT",
+      TRUE ~ as.character(chr_num)
+    )
+  ) %>%
+  dplyr::select(chr = chr_name, pos, data_type, n_variants, mean_vaf, genomic_pos) %>%
+  mutate(
+    chr_no_prefix = chr,  # Remove "chr" prefix for biomaRt
+    pos = round(pos)
+  )
+
+cat("Converted coordinates:\n")
+print(top_positions_converted)
+
+cat("\n═══════════════════════════════════════════════════════════════════════\n")
+cat("STEP 3: ANNOTATE WITH GENES (biomaRt - Ensembl hg38)\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+# CRITICAL FIX: Use correct Ensembl GRCh38
+cat("Connecting to Ensembl GRCh38...\n")
+ensembl <- useEnsembl(
+  biomart = "ensembl",
+  dataset = "hsapiens_gene_ensembl",
+  version = 113,  # Use explicit version number for hg38
+)
+
+cat("Connected successfully!\n\n")
+
+# Annotate each position
+gene_annotations <- tibble()
+
+for (i in 1:nrow(top_positions_converted)) {
+  row <- top_positions_converted[i, ]
+  
+  cat("Annotating position", i, "/", nrow(top_positions_converted), ": chr", 
+      row$chr_no_prefix, ":", row$pos, " (", row$data_type, ")\n")
+  
+  tryCatch({
+    # biomaRt requires chromosome name WITHOUT "chr" prefix
+    genes <- getBM(
+      attributes = c(
+        'hgnc_symbol', 'ensembl_gene_id', 'chromosome_name',
+        'start_position', 'end_position', 'strand', 'gene_biotype'
+      ),
+      filters = c('chromosome_name', 'start', 'end'),
+      values = list(
+        chromosome_name = row$chr_no_prefix,
+        start = as.numeric(row$pos) - 10000,  # ±10kb window
+        end = as.numeric(row$pos) + 10000
+      ),
+      mart = ensembl,
+      useCache = FALSE
+    )
+    
+    if (nrow(genes) > 0) {
+      genes <- genes %>%
+        as_tibble() %>%
+        mutate(
+          query_chr = row$chr,
+          query_pos = row$pos,
+          query_nvar = row$n_variants,
+          query_vaf = row$mean_vaf,
+          query_data_type = row$data_type
+        )
+      
+      gene_annotations <- bind_rows(gene_annotations, genes)
+      cat("  ✓ Found", nrow(genes), "gene(s)\n")
+    } else {
+      cat("  ✗ No genes in ±10kb window\n")
+    }
+  }, error = function(e) {
+    cat("  ⚠ Query error:", conditionMessage(e), "\n")
+  })
+}
+
+cat("\n═══════════════════════════════════════════════════════════════════════\n")
+cat("Annotation complete! Found", nrow(gene_annotations), "gene hits\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+if (nrow(gene_annotations) > 0) {
+  
+  # Clean up annotation table
+  gene_annotations_clean <- gene_annotations %>%
+    rename(
+      gene_name = hgnc_symbol,
+      gene_id = ensembl_gene_id,
+      gene_chr = chromosome_name,
+      gene_start = start_position,
+      gene_end = end_position,
+      gene_strand = strand,
+      gene_biotype = gene_biotype
+    ) %>%
+    mutate(
+      distance_to_gene = case_when(
+        query_pos < gene_start ~ gene_start - query_pos,
+        query_pos > gene_end ~ query_pos - gene_end,
+        TRUE ~ 0  # Inside gene
+      ),
+      location = case_when(
+        distance_to_gene == 0 ~ "WITHIN_GENE",
+        distance_to_gene < 5000 ~ "NEAR_GENE (<5kb)",
+        distance_to_gene < 50000 ~ "NEARBY (5-50kb)",
+        TRUE ~ "INTERGENIC (>50kb)"
+      )
+    ) %>%
+    arrange(query_data_type, query_chr, query_pos, distance_to_gene) %>%
+    dplyr::select(
+      data_type = query_data_type,
+      chr = query_chr,
+      pos = query_pos,
+      n_variants = query_nvar,
+      mean_vaf = query_vaf,
+      gene_name, gene_id, gene_biotype, location, distance_to_gene,
+      gene_chr, gene_start, gene_end, gene_strand
+    )
+  
+  cat("═══════════════════════════════════════════════════════════════════════\n")
+  cat("STEP 4: SAVE TO CSV (Publication-ready format)\n")
+  cat("═══════════════════════════════════════════════════════════════════════\n\n")
+  
+  # File paths
+  output_file_annotated <- file.path(output_dir, "Top2_Variants_Gene_Annotations_hg38.csv")
+  output_file_summary <- file.path(output_dir, "Top2_Variants_Summary.csv")
+  
+  # Save full annotation
+write.csv2(gene_annotations_clean, output_file_annotated)
+  cat("✓ Saved:", output_file_annotated, "\n")
+  
+  # Save summary (closest gene per position)
+  gene_summary <- gene_annotations_clean %>%
+    group_by(data_type, chr, pos) %>%
+    arrange(distance_to_gene) %>%
+    slice(1) %>%
+    ungroup() %>%
+    mutate(distance_kb = distance_to_gene / 1000)
+  
+  write.csv2(gene_summary, output_file_summary)
+  cat("✓ Saved:", output_file_summary, "\n\n")
+  
+  # Print summary table
+  cat("GENE ANNOTATION SUMMARY:\n")
+  print(gene_summary %>% dplyr::select(data_type, chr, pos, n_variants, gene_name, location, distance_kb))
+  
+  
+    # Print summary table
+  cat("GENE ANNOTATION SUMMARY:\n")
+  print(gene_summary %>% dplyr::select(data_type, chr, pos, n_variants, gene_name, location, distance_kb))
+  
+  # ═══ ADD THIS SECTION ═══
+  cat("\n═══════════════════════════════════════════════════════════════════════\n")
+  cat("CLOSEST GENE TABLE: Variants with NEARBY Genes (<50kb)\n")
+  cat("═══════════════════════════════════════════════════════════════════════\n\n")
+  
+  # Filter for positions CLOSE to genes
+  close_genes <- gene_summary %>%
+    filter(location != "INTERGENIC (>50kb)" & gene_name != "") %>%
+    dplyr::select(data_type, chr, pos, n_variants, mean_vaf, gene_name, gene_biotype, location, distance_kb) %>%
+    arrange(data_type, distance_kb)
+  
+  if (nrow(close_genes) > 0) {
+    cat("Found", nrow(close_genes), "variant(s) close to genes:\n\n")
+    print(close_genes)
+    
+    # Save to separate CSV
+    output_file_close <- file.path(output_dir, "Top2_Variants_Close_To_Genes.csv")
+    write.csv2(close_genes, output_file_close)
+    cat("\n✓ Saved:", output_file_close, "\n")
+  } else {
+    cat("No variants found close to genes (all >50kb from annotations)\n")
+  }
+  # ═══ END NEW SECTION ═══
+
+  
+  cat("\n═══════════════════════════════════════════════════════════════════════\n")
+  cat("STEP 5: CREATE PLOTS\n")
+  cat("═══════════════════════════════════════════════════════════════════════\n\n")
+  
+  # Plot 1: VAF by data type
+p1 <- gene_summary %>%
+  filter(!is.na(gene_name), gene_name != "", !grepl("^\\s*$", gene_name)) %>%
+  mutate(gene_name = forcats::fct_reorder(gene_name, mean_vaf)) %>%
+  ggplot(aes(x = gene_name, y = mean_vaf * 100, fill = data_type)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0))) +
+  scale_fill_manual(
+    values = c(
+      "BM" = "#1f77b4",
+      "Illumina_cfDNA" = "#2ca02c",
+      "Ultima_cfDNA" = "#ff7f0e"
+    ),
+    name = "Sample Type"
+  ) +
+  coord_flip() +
+  labs(
+    title = "Mean VAF at Top 2 Variant Frequency Positions",
+    x = "Gene",
+    y = "Mean VAF (%)",
+    caption = "hg38 annotation"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 12, face = "bold"),
+    legend.position = "bottom",
+    axis.text.x = element_text(size = 9),
+    axis.text.y = element_text(size = 8)
+  )
+  
+  ggsave(
+    file.path(output_dir, "Plot_Top2_Variants_VAF.pdf"),
+    p1, width = 10, height = 12, dpi = 300
+  )
+  ggsave(
+    file.path(output_dir, "Plot_Top2_Variants_VAF.png"),
+    p1, width = 10, height = 12, dpi = 300
+  )
+  cat("✓ Saved: Plot_Top2_Variants_VAF\n")
+  
+  # Plot 2: Gene biotypes
+  p2 <- gene_summary %>%
+    filter(gene_name != "") %>%
+    ggplot(aes(x = gene_biotype, fill = data_type)) +
+    geom_bar(position = "dodge") +
+    scale_fill_manual(
+      values = c("BM" = "#1f77b4", "Illumina_cfDNA" = "#2ca02c", "Ultima_cfDNA" = "#ff7f0e"),
+      name = "Sample Type"
+    ) +
+    labs(
+      title = "Gene Biotypes at Top Variant Positions",
+      x = "Biotype",
+      y = "Count",
+      caption = "hg38 annotation (Ensembl)"
+    ) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 12, face = "bold"),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "bottom"
+    )
+  
+  ggsave(
+    file.path(output_dir, "Plot_Gene_Biotypes.pdf"),
+    p2, width = 8, height = 6, dpi = 300
+  )
+  ggsave(
+    file.path(output_dir, "Plot_Gene_Biotypes.png"),
+    p2, width = 8, height = 6, dpi = 300
+  )
+  cat("✓ Saved: Plot_Gene_Biotypes\n")
+  
+  cat("\n═══════════════════════════════════════════════════════════════════════\n")
+  cat("COMPLETE!\n")
+  cat("═══════════════════════════════════════════════════════════════════════\n\n")
+  cat("Output files:\n")
+  cat("  • Top2_Variants_Gene_Annotations_hg38.csv (full data)\n")
+  cat("  • Top2_Variants_Summary.csv (1 closest gene per position)\n")
+  cat("  • Plot_Top2_Variants_VAF.pdf/png\n")
+  cat("  • Plot_Gene_Biotypes.pdf/png\n\n")
+  cat("Genome: GRCh38 (hg38)\n")
+  cat("Ensembl version: 113 (stable for hg38)\n")
+  cat("═══════════════════════════════════════════════════════════════════════\n")
+  
+} else {
+  cat("WARNING: No genes found in annotations.\n")
+  cat("This may indicate:\n")
+  cat("  1. Positions are in intergenic regions\n")
+  cat("  2. BiomaRt connection issue\n")
+  cat("  3. Chromosome format mismatch\n\n")
+  cat("Debugging: Check top_positions_converted manually:\n")
+  print(top_positions_converted)
+}
+
+```
+
+```{r}
+# ============================================================================
+# VAF ANALYSIS: DENSITY PLOTS + STATISTICAL TESTS
+# Publication-Ready Complete Workflow
+# Multiple Myeloma cfDNA vs. Bone Marrow Analysis
+# ============================================================================
+output_dir = '/Users/tobiagbede/Desktop/UofT/PhD/Pugh Lab/Projects/Aim1_Clones/VAF_Explore/vaf_analysis_output'
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(ggpubr)
+library(ggridges)
+library(purrr)
+library(dplyr)
+
+# ============================================================================
+# 0) HELPER FUNCTIONS
+# ============================================================================
+
+# Cohen's d effect size
+cohen_d <- function(x, y) {
+  nx <- length(x)
+  ny <- length(y)
+  dof <- nx + ny - 2
+  return(
+    (mean(x, na.rm = TRUE) - mean(y, na.rm = TRUE)) / 
+      sqrt(((nx-1)*sd(x, na.rm = TRUE)^2 + (ny-1)*sd(y, na.rm = TRUE)^2) / dof)
+  )
+}
+
+# Cohen's d interpretation
+interpret_cohens_d <- function(d) {
+  abs_d <- abs(d)
+  if (abs_d < 0.2) return("Negligible")
+  if (abs_d < 0.5) return("Small")
+  if (abs_d < 0.8) return("Medium")
+  return("Large")
+}
+
+# ============================================================================
+# 1) CREATE VAF SEGMENTS (0-15%, 15-50%, 50%+)
+# ============================================================================
+
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("STEP 1: PREPARE DATA & CREATE VAF SEGMENTS\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+vaf_plot <- vaf_plot %>%
+  mutate(
+    vaf_pct = vaf / 100,
+    vaf_segment = case_when(
+      vaf_pct < 0.15 ~ "VAF: 0-15% (Subclonal)",
+      vaf_pct >= 0.15 & vaf_pct < 0.50 ~ "VAF: 15-50% (Minor Clonal)",
+      vaf_pct >= 0.50 ~ "VAF: 50%+ (Major Clonal)"
+    ),
+    vaf_segment = factor(vaf_segment, 
+                         levels = c("VAF: 0-15% (Subclonal)", 
+                                   "VAF: 15-50% (Minor Clonal)", 
+                                   "VAF: 50%+ (Major Clonal)"))
+  )
+
+# VAF segment statistics
+vaf_segment_stats <- vaf_plot %>%
+  group_by(data_type, vaf_segment) %>%
+  summarise(
+    n_variants = n(),
+    pct_of_type = round(n() / n_distinct(data_type) * 100, 2),
+    mean_vaf = round(mean(vaf_pct, na.rm = TRUE) * 100, 2),
+    median_vaf = round(median(vaf_pct, na.rm = TRUE) * 100, 2),
+    sd_vaf = round(sd(vaf_pct, na.rm = TRUE) * 100, 2),
+    .groups = "drop"
+  ) %>%
+  arrange(data_type, vaf_segment)
+
+cat("VAF Segment Statistics:\n")
+print(vaf_segment_stats)
+cat("\n")
+
+write.table(vaf_segment_stats,
+            file.path(output_dir, "Table1_VAF_Segment_Statistics.txt"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
+cat("✓ Table 1 saved\n\n")
+
+# ============================================================================
+# 2) FIGURE 1: OVERLAID DENSITY PLOTS (All platforms, 3 VAF segments)
+# ============================================================================
+
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("STEP 2: GENERATING FIGURE 1 - OVERLAID DENSITY PLOTS\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+p1 <- ggplot(vaf_plot, aes(x = genomic_pos / 1e9, fill = data_type, color = data_type)) +
+  geom_density(alpha = 0.35, adjust = 1.5, linewidth = 1) +
+  facet_wrap(~vaf_segment, ncol = 1, scales = "free_y") +
+  scale_fill_manual(
+    values = c("BM" = "#1f77b4", "Illumina_cfDNA" = "#2ca02c", "Ultima_cfDNA" = "#ff7f0e"),
+    name = "Sequencing Platform"
+  ) +
+  scale_color_manual(
+    values = c("BM" = "#1f77b4", "Illumina_cfDNA" = "#2ca02c", "Ultima_cfDNA" = "#ff7f0e"),
+    name = "Sequencing Platform"
+  ) +
+  labs(
+    x = "Genomic Position (Gb)",
+    y = "Density",
+    title = "VAF Density Distribution Across Genome",
+    subtitle = "Stratified by VAF segments: subclonal (0-15%), minor clonal (15-50%), major clonal (50%+)"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(face = "bold", size = 11),
+    legend.position = "bottom",
+    plot.title = element_text(size = 13, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40"),
+    panel.grid.minor = element_blank()
+  )
+
+ggsave(
+  file.path(output_dir, "Fig1_Overlaid_Density_3Segments.pdf"),
+  p1, width = 12, height = 10, dpi = 300
+)
+ggsave(
+  file.path(output_dir, "Fig1_Overlaid_Density_3Segments.png"),
+  p1, width = 12, height = 10, dpi = 300
+)
+cat("✓ Figure 1 saved\n\n")
+
+# ============================================================================
+# 3) FIGURE 2: PLATFORM-SPECIFIC DENSITY PLOTS
+# ============================================================================
+
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("STEP 3: GENERATING FIGURE 2 - PLATFORM-SPECIFIC DENSITIES\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+p2 <- ggplot(vaf_plot, aes(x = genomic_pos / 1e9, fill = vaf_segment, color = vaf_segment)) +
+  geom_density(alpha = 0.5, adjust = 1.5, linewidth = 0.8) +
+  facet_wrap(~data_type, ncol = 1, scales = "free_y") +
+  scale_fill_manual(
+    values = c("VAF: 0-15% (Subclonal)" = "#e41a1c",
+               "VAF: 15-50% (Minor Clonal)" = "#377eb8",
+               "VAF: 50%+ (Major Clonal)" = "#4daf4a"),
+    name = "VAF Segment"
+  ) +
+  scale_color_manual(
+    values = c("VAF: 0-15% (Subclonal)" = "#e41a1c",
+               "VAF: 15-50% (Minor Clonal)" = "#377eb8",
+               "VAF: 50%+ (Major Clonal)" = "#4daf4a"),
+    name = "VAF Segment"
+  ) +
+  labs(
+    x = "Genomic Position (Gb)",
+    y = "Density",
+    title = "Platform-Specific Clonal Architecture",
+    subtitle = "Each platform shown separately with VAF segments overlaid"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(face = "bold", size = 11),
+    legend.position = "bottom",
+    plot.title = element_text(size = 13, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40"),
+    panel.grid.minor = element_blank()
+  )
+
+ggsave(
+  file.path(output_dir, "Fig2_Platform_Specific_Density.pdf"),
+  p2, width = 12, height = 10, dpi = 300
+)
+ggsave(
+  file.path(output_dir, "Fig2_Platform_Specific_Density.png"),
+  p2, width = 12, height = 10, dpi = 300
+)
+cat("✓ Figure 2 saved\n\n")
+
+# ============================================================================
+# 4) FIGURE 3: RIDGE DENSITY PLOT
+# ============================================================================
+
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("STEP 4: GENERATING FIGURE 3 - RIDGE DENSITY\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+p3 <- ggplot(vaf_plot, aes(x = genomic_pos / 1e9, y = data_type, fill = vaf_segment)) +
+  geom_density_ridges(alpha = 0.6, scale = 2, color = "white", linewidth = 0.5) +
+  scale_fill_manual(
+    values = c("VAF: 0-15% (Subclonal)" = "#e41a1c",
+               "VAF: 15-50% (Minor Clonal)" = "#377eb8",
+               "VAF: 50%+ (Major Clonal)" = "#4daf4a"),
+    name = "VAF Segment"
+  ) +
+  labs(
+    x = "Genomic Position (Gb)",
+    y = "Sequencing Platform",
+    title = "Ridge Density: Platform Comparison",
+    subtitle = "Stacked density distributions colored by VAF segment"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 13, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40"),
+    axis.text.y = element_text(face = "bold", size = 11),
+    panel.grid.minor = element_blank()
+  )
+
+ggsave(
+  file.path(output_dir, "Fig3_Ridge_Density.pdf"),
+  p3, width = 12, height = 7, dpi = 300
+)
+ggsave(
+  file.path(output_dir, "Fig3_Ridge_Density.png"),
+  p3, width = 12, height = 7, dpi = 300
+)
+cat("✓ Figure 3 saved\n\n")
+
+# ============================================================================
+# 5) STATISTICAL TESTS
+# ============================================================================
+
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("STEP 5: STATISTICAL TESTING\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+# Extract VAFs by platform
+bm_vaf <- vaf_plot %>% filter(data_type == "BM") %>% pull(vaf_pct)
+illumina_vaf <- vaf_plot %>% filter(data_type == "Illumina_cfDNA") %>% pull(vaf_pct)
+ultima_vaf <- vaf_plot %>% filter(data_type == "Ultima_cfDNA") %>% pull(vaf_pct)
+
+# 5a) Overall Kruskal-Wallis test
+overall_kw <- kruskal.test(vaf_pct ~ data_type, data = vaf_plot)
+
+# 5b) Pairwise Mann-Whitney U tests
+platforms <- unique(vaf_plot$data_type)
+pairwise_combinations <- combn(platforms, 2, simplify = FALSE)
+
+pairwise_results <- tibble()
+
+for (pair in pairwise_combinations) {
+  p1 <- pair[1]
+  p2 <- pair[2]
+  
+  vaf1 <- vaf_plot %>% filter(data_type == p1) %>% pull(vaf_pct)
+  vaf2 <- vaf_plot %>% filter(data_type == p2) %>% pull(vaf_pct)
+  
+  mw_test <- wilcox.test(vaf1, vaf2)
+  
+  pairwise_results <- bind_rows(
+    pairwise_results,
+    tibble(
+      platform_1 = p1,
+      platform_2 = p2,
+      n1 = length(vaf1),
+      n2 = length(vaf2),
+      median_vaf1 = round(median(vaf1, na.rm = TRUE), 4),
+      median_vaf2 = round(median(vaf2, na.rm = TRUE), 4),
+      u_statistic = round(mw_test$statistic, 0),
+      p_value = mw_test$p.value
+    )
+  )
+}
+
+pairwise_results <- pairwise_results %>%
+  mutate(
+    p_adj = p.adjust(p_value, method = "fdr"),
+    significant = p_adj < 0.05
+  )
+
+# 5c) Segment-specific Kruskal-Wallis tests
+segment_tests <- tibble()
+
+for (segment in unique(vaf_plot$vaf_segment)) {
+  segment_data <- vaf_plot %>% filter(vaf_segment == segment)
+  
+  if (n_distinct(segment_data$data_type) >= 2) {
+    kw_test <- kruskal.test(vaf_pct ~ data_type, data = segment_data)
+    
+    segment_tests <- bind_rows(
+      segment_tests,
+      tibble(
+        vaf_segment = segment,
+        h_statistic = round(kw_test$statistic, 4),
+        p_value = kw_test$p.value,
+        n_variants = nrow(segment_data)
+      )
+    )
+  }
+}
+
+segment_tests <- segment_tests %>%
+  mutate(
+    p_adj = p.adjust(p_value, method = "fdr"),
+    significant = p_adj < 0.05
+  )
+
+# 5d) Effect sizes (Cohen's d)
+effect_sizes <- tibble(
+  comparison = c("Illumina vs. BM", "Ultima vs. BM"),
+  cohens_d = c(cohen_d(illumina_vaf, bm_vaf), cohen_d(ultima_vaf, bm_vaf)),
+  interpretation = c(
+    interpret_cohens_d(cohen_d(illumina_vaf, bm_vaf)),
+    interpret_cohens_d(cohen_d(ultima_vaf, bm_vaf))
+  )
+)
+
+# 5e) Kolmogorov-Smirnov tests
+ks_results <- tibble()
+
+# Overall
+ks_illumina_overall <- ks.test(bm_vaf, illumina_vaf)
+ks_ultima_overall <- ks.test(bm_vaf, ultima_vaf)
+
+ks_results <- bind_rows(
+  ks_results,
+  tibble(
+    segment = "Overall",
+    platform = "Illumina_cfDNA",
+    ks_statistic = round(ks_illumina_overall$statistic, 4),
+    p_value = ks_illumina_overall$p.value,
+    n_variants = length(illumina_vaf)
+  ),
+  tibble(
+    segment = "Overall",
+    platform = "Ultima_cfDNA",
+    ks_statistic = round(ks_ultima_overall$statistic, 4),
+    p_value = ks_ultima_overall$p.value,
+    n_variants = length(ultima_vaf)
+  )
+)
+
+# By segment
+for (segment in unique(vaf_plot$vaf_segment)) {
+  segment_bm <- vaf_plot %>% filter(data_type == "BM", vaf_segment == segment) %>% pull(vaf_pct)
+  segment_illumina <- vaf_plot %>% filter(data_type == "Illumina_cfDNA", vaf_segment == segment) %>% pull(vaf_pct)
+  segment_ultima <- vaf_plot %>% filter(data_type == "Ultima_cfDNA", vaf_segment == segment) %>% pull(vaf_pct)
+  
+  if (length(segment_bm) > 0 & length(segment_illumina) > 0) {
+    ks_ill <- ks.test(segment_bm, segment_illumina)
+    ks_results <- bind_rows(
+      ks_results,
+      tibble(
+        segment = segment,
+        platform = "Illumina_cfDNA",
+        ks_statistic = round(ks_ill$statistic, 4),
+        p_value = ks_ill$p.value,
+        n_variants = length(segment_illumina)
+      )
+    )
+  }
+  
+  if (length(segment_bm) > 0 & length(segment_ultima) > 0) {
+    ks_ult <- ks.test(segment_bm, segment_ultima)
+    ks_results <- bind_rows(
+      ks_results,
+      tibble(
+        segment = segment,
+        platform = "Ultima_cfDNA",
+        ks_statistic = round(ks_ult$statistic, 4),
+        p_value = ks_ult$p.value,
+        n_variants = length(segment_ultima)
+      )
+    )
+  }
+}
+
+ks_results <- ks_results %>%
+  mutate(significant = p_value < 0.05)
+
+# ============================================================================
+# 6) SAVE STATISTICAL RESULTS
+# ============================================================================
+
+sink(file.path(output_dir, "Table2_Statistical_Tests_Complete.txt"))
+
+cat("╔═══════════════════════════════════════════════════════════════════════╗\n")
+cat("║        STATISTICAL ANALYSIS: VAF DISTRIBUTION COMPARISON             ║\n")
+cat("║    Bone Marrow vs. Illumina cfDNA vs. Ultima cfDNA                   ║\n")
+cat("╚═══════════════════════════════════════════════════════════════════════╝\n\n")
+
+library(dplyr)
+cat("1. OVERALL KRUSKAL-WALLIS TEST (3-way comparison)\n")
+cat("   ─────────────────────────────────────────────────\n")
+cat("   H-statistic:", round(overall_kw$statistic, 4), "\n")
+cat("   p-value:", format(overall_kw$p.value, scientific = TRUE), "\n")
+cat("   Result:", ifelse(overall_kw$p.value < 0.05, "SIGNIFICANT ✓", "NOT SIGNIFICANT"), "\n")
+cat("   Interpretation: VAF distributions differ significantly across platforms\n\n")
+
+cat("2. PAIRWISE MANN-WHITNEY U TESTS (FDR-corrected)\n")
+cat("   ──────────────────────────────────────────────\n")
+print(pairwise_results %>%
+      dplyr::select(platform_1, platform_2, median_vaf1, median_vaf2, p_adj, significant))
+cat("\n")
+
+cat("3. SEGMENT-SPECIFIC KRUSKAL-WALLIS TESTS\n")
+cat("   ────────────────────────────────────────\n")
+print(segment_tests)
+cat("\n")
+
+cat("4. EFFECT SIZES (Cohen's d)\n")
+cat("   ─────────────────────────\n")
+print(effect_sizes)
+cat("   Interpretation: |d| < 0.2 (negligible), 0.2-0.5 (small), 0.5-0.8 (medium), >0.8 (large)\n\n")
+
+cat("5. KOLMOGOROV-SMIRNOV TESTS (Lower KS = More Similar to BM)\n")
+cat("   ─────────────────────────────────────────────────────────\n")
+print(ks_results)
+cat("\n")
+
+# ============================================================================
+# CONSENSUS DETERMINATION
+# ============================================================================
+
+cat("╔═══════════════════════════════════════════════════════════════════════╗\n")
+cat("║              WHICH PLATFORM IS CLOSEST TO BM?                        ║\n")
+cat("╚═══════════════════════════════════════════════════════════════════════╝\n\n")
+
+# From KS test (overall)
+ks_best <- ks_results %>% filter(segment == "Overall") %>% arrange(ks_statistic) %>% slice(1)
+ks_winner <- ks_best$platform[1]
+
+# From Cohen's d
+d_best <- effect_sizes %>% mutate(abs_d = abs(cohens_d)) %>% arrange(abs_d) %>% slice(1)
+d_winner = str_extract(d_best$comparison[1], "^[A-Za-z_]+")
+d_winner = paste0(d_winner, "_cfDNA")
+
+# From median difference
+median_diff_ill <- abs(median(illumina_vaf, na.rm = TRUE) - median(bm_vaf, na.rm = TRUE))
+median_diff_ult <- abs(median(ultima_vaf, na.rm = TRUE) - median(bm_vaf, na.rm = TRUE))
+median_winner <- ifelse(median_diff_ill < median_diff_ult, "Illumina_cfDNA", "Ultima_cfDNA")
+
+# Votes
+votes <- c(ks_winner, d_winner, median_winner)
+vote_counts <- table(votes)
+best_platform <- names(vote_counts)[which.max(vote_counts)]
+
+cat("Method 1: KS Test (Distribution Shape)\n")
+cat("  Winner: ", ks_winner, " (KS = ", ks_best$platform, ")\n")
+cat("  Interpretation: Lower KS = distribution more similar to BM\n\n")
+
+cat("Method 2: Cohen's d (Effect Size)\n")
+cat("  Winner: ", d_winner, " (|d| = ", round(d_best$abs_d[1], 4), ")\n")
+cat("  Interpretation: Smaller |d| = smaller mean difference from BM\n\n")
+
+cat("Method 3: Median Difference\n")
+cat("  Illumina median VAF diff from BM: ", round(median_diff_ill, 4), "\n")
+cat("  Ultima median VAF diff from BM:   ", round(median_diff_ult, 4), "\n")
+cat("  Winner: ", median_winner, "\n\n")
+
+cat("─────────────────────────────────────────────────────────────────────\n")
+cat("VOTING SUMMARY:\n")
+for (i in 1:length(vote_counts)) {
+  cat("  ", names(vote_counts)[i], ": ", vote_counts[i], " votes\n")
+}
+cat("\n")
+
+cat("╔═══════════════════════════════════════════════════════════════════════╗\n")
+cat("║ FINAL CONSENSUS: ", best_platform, " is CLOSEST to BM            ║\n")
+cat("║                                                                       ║\n")
+if (best_platform == "Illumina_cfDNA") {
+  cat("║ Illumina cfDNA more faithfully recapitulates BM VAF distribution   ║\n")
+} else {
+  cat("║ Ultima cfDNA more faithfully recapitulates BM VAF distribution     ║\n")
+}
+cat("╚═══════════════════════════════════════════════════════════════════════╝\n\n")
+
+sink()
+
+cat("✓ Table 2 saved\n\n")
+
+# ============================================================================
+# 7) VISUALIZATION PLOTS
+# ============================================================================
+
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("STEP 6: GENERATING STATISTICAL VISUALIZATION PLOTS\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+# Figure 4: KS Test by Segment
+p4 <- ks_results %>%
+  filter(segment != "Overall") %>%
+  ggplot(aes(x = segment, y = ks_statistic, fill = platform)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+  scale_fill_manual(
+    values = c("Illumina_cfDNA" = "#2ca02c", "Ultima_cfDNA" = "#ff7f0e"),
+    name = "Platform"
+  ) +
+  geom_hline(yintercept = min(ks_results$ks_statistic), linetype = "dashed", color = "green", alpha = 0.5) +
+  labs(
+    x = "VAF Segment",
+    y = "KS Statistic vs. BM",
+    title = "Distribution Similarity by VAF Segment",
+    subtitle = "Lower KS = more similar to BM; green line = best match"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 12, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  )
+
+ggsave(
+  file.path(output_dir, "Fig4_KS_Test_Segments.pdf"),
+  p4, width = 10, height = 6, dpi = 300
+)
+ggsave(
+  file.path(output_dir, "Fig4_KS_Test_Segments.png"),
+  p4, width = 10, height = 6, dpi = 300
+)
+cat("✓ Figure 4 saved\n")
+
+# Figure 5: Effect Sizes
+p5 <- effect_sizes %>%
+  ggplot(aes(x = comparison, y = cohens_d, fill = comparison)) +
+  geom_bar(stat = "identity", width = 0.6, alpha = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 1) +
+  geom_hline(yintercept = c(-0.2, 0.2, -0.5, 0.5), linetype = "dotted", 
+             color = "grey", alpha = 0.5, linewidth = 0.5) +
+  scale_fill_manual(
+    values = c("Illumina vs. BM" = "#2ca02c", "Ultima vs. BM" = "#ff7f0e"),
+    guide = "none"
+  ) +
+  coord_flip() +
+  labs(
+    x = "Comparison",
+    y = "Cohen's d",
+    title = "Effect Size: Mean VAF Difference from BM",
+    subtitle = "Dotted lines show effect size thresholds (0.2, 0.5); closer to 0 = more similar"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 12, face = "bold")
+  )
+
+ggsave(
+  file.path(output_dir, "Fig5_Effect_Sizes.pdf"),
+  p5, width = 10, height = 5, dpi = 300
+)
+ggsave(
+  file.path(output_dir, "Fig5_Effect_Sizes.png"),
+  p5, width = 10, height = 5, dpi = 300
+)
+cat("✓ Figure 5 saved\n")
+
+# Figure 6: Overall KS Comparison
+p6 <- ks_results %>%
+  filter(segment == "Overall") %>%
+  ggplot(aes(x = platform, y = ks_statistic, fill = platform)) +
+  geom_bar(stat = "identity", width = 0.5, alpha = 0.8) +
+  scale_fill_manual(
+    values = c("Illumina_cfDNA" = "#2ca02c", "Ultima_cfDNA" = "#ff7f0e"),
+    guide = "none"
+  ) +
+  geom_text(aes(label = paste0("KS = ", ks_statistic), y = ks_statistic + 0.02),
+            vjust = 0, hjust = 0.5, size = 4, fontface = "bold") +
+  labs(
+    x = "Platform",
+    y = "KS Statistic (vs. BM)",
+    title = "Overall Distribution Similarity: Which Platform Matches BM?",
+    subtitle = "Lower KS = better match"
+  ) +
+  ylim(0, max(ks_results$ks_statistic) * 1.1) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 12, face = "bold"),
+    axis.text.x = element_text(face = "bold", size = 11)
+  )
+
+ggsave(
+  file.path(output_dir, "Fig6_KS_Overall_Winner.pdf"),
+  p6, width = 8, height = 6, dpi = 300
+)
+ggsave(
+  file.path(output_dir, "Fig6_KS_Overall_Winner.png"),
+  p6, width = 8, height = 6, dpi = 300
+)
+cat("✓ Figure 6 saved\n\n")
+
+# ============================================================================
+# 8) FINAL SUMMARY
+# ============================================================================
+
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("ANALYSIS COMPLETE!\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+cat("PUBLICATION-READY OUTPUTS:\n\n")
+cat("FIGURES:\n")
+cat("  ✓ Fig1: Overlaid density plots (3 VAF segments, all platforms)\n")
+cat("  ✓ Fig2: Platform-specific densities (each platform separately)\n")
+cat("  ✓ Fig3: Ridge density plot (stacked by platform)\n")
+cat("  ✓ Fig4: KS test by VAF segment (platform comparison)\n")
+cat("  ✓ Fig5: Effect sizes (Cohen's d comparison)\n")
+cat("  ✓ Fig6: Overall KS winner (best match to BM)\n\n")
+
+cat("TABLES:\n")
+cat("  ✓ Table1: VAF segment statistics\n")
+cat("  ✓ Table2: Complete statistical test results + consensus\n\n")
+
+cat("KEY RESULT:\n")
+cat("  ➜ Best match to BM: ", best_platform, "\n\n")
+
+cat("═══════════════════════════════════════════════════════════════════════\n")
+
+```
+
+```{r}
+# Complete density plots!!
+
+# ============================================================================
+# SIMPLE VAF DENSITY PLOT: BM vs Illumina_30X vs Ultima_200X
+# Publication-Ready
+# Assumes you already have: vaf_plot, output_dir
+# ============================================================================
+
+library(dplyr)
+library(ggplot2)
+
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("GENERATING VAF DENSITY PLOT (RELABELLED LEGEND)\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+# ---- Relabel for plotting only ----
+plot_label_map <- c(
+  "BM" = "BM",
+  "Illumina_cfDNA" = "Illumina_30X",
+  "Ultima_cfDNA" = "Ultima_200X"
+)
+
+# Prepare data
+vaf_density_data <- vaf_plot %>%
+  dplyr::select(data_type, vaf) %>%
+  mutate(
+    vaf_pct = vaf / 100,
+    platform_label = dplyr::recode(data_type, !!!plot_label_map)
+  ) %>%
+  filter(!is.na(vaf_pct), is.finite(vaf_pct), !is.na(platform_label))
+
+# Keep a consistent legend order
+vaf_density_data <- vaf_density_data %>%
+  mutate(platform_label = factor(platform_label, levels = c("BM", "Illumina_30X", "Ultima_200X")))
+
+# Colors keyed to the NEW labels
+platform_colors <- c(
+  "BM" = "#1f77b4",
+  "Illumina_30X" = "#2ca02c",
+  "Ultima_200X" = "#ff7f0e"
+)
+
+# Density plot
+p_density <- ggplot(vaf_density_data, aes(x = vaf_pct * 100, fill = platform_label, color = platform_label)) +
+  geom_density(alpha = 0.4, linewidth = 1.2, adjust = 1.5) +
+  scale_fill_manual(values = platform_colors, name = "Platform") +
+  scale_color_manual(values = platform_colors, name = "Platform") +
+  labs(
+    x = "Variant Allele Frequency (VAF, %)",
+    y = "Density",
+    title = "VAF Distribution Comparison",
+    subtitle = "Bone marrow vs cfDNA platforms"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 11, color = "grey40", hjust = 0.5),
+    axis.title = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 10),
+    legend.position = "bottom",
+    legend.text = element_text(size = 11),
+    legend.title = element_text(size = 12, face = "bold"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "grey90", linewidth = 0.3)
+  )
+
+ggsave(file.path(output_dir, "VAF_Density_All_Platforms_Relabelled.pdf"),
+       p_density, width = 12, height = 7, dpi = 300)
+ggsave(file.path(output_dir, "VAF_Density_All_Platforms_Relabelled.png"),
+       p_density, width = 12, height = 7, dpi = 300)
+
+cat("✓ Saved:\n")
+cat("  - VAF_Density_All_Platforms_Relabelled.pdf\n")
+cat("  - VAF_Density_All_Platforms_Relabelled.png\n\n")
+
+
+```
+
+
+```{r}
+# Binomial Modelling for error for subclone detection probability
+
+# Probability of detecting VAF v at depth d
+detect_prob <- function(depth, vaf, error_rate = 0.01, min_reads = 3) {
+  # Expected number of mutant reads
+  expected_mutant <- depth * vaf
+  
+  # Binomial probability (≥ min_reads mutant alleles)
+  prob <- 1 - pbinom(min_reads - 1, depth, vaf + error_rate)
+  return(prob)
+}
+
+# Test across depths
+depths <- seq(1, 500, by = 1)
+#depths <- c(100, 250, 500, 1000, 5000, 10000, 20000)
+vafs <- c(0.001, 0.005, 0.01, 0.05, 0.1)
+
+# Create matrix
+sensitivity_matrix <- expand_grid(depth = depths, vaf = vafs) %>%
+  mutate(
+    prob_detect = mapply(detect_prob, depth, vaf),
+    depth_label = paste0(depth, "×"),
+    vaf_pct = vaf * 100
+  )
+
+# Visualize
+p <- sensitivity_matrix %>%
+  ggplot(aes(x = depth,
+             y = prob_detect,
+             color = factor(vaf_pct),
+             group = vaf_pct)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  geom_vline(xintercept = 200, linetype = "dashed", color = "black") +
+  geom_vline(xintercept = 30, linetype = "dashed", color = "black") +
+  labs(
+    title = "Subclone Detection Probability vs Sequencing Depth",
+    x = "Sequencing Depth",
+    y = "Detection Probability",
+    color = "VAF (%)"
+  ) +
+  theme_bw() +
+  y
+  xlim(0, 500)
+
+# expected vaf of about 0.5%
+ggsave(
+  file.path(output_dir, "Probability_Subclone_Detect.png"),
+  p, width = 8, height = 6, dpi = 300
+)
+```
+
+
+```{r}
+# do the same in illumina and BM and compare - done
+# define how to restrict real clones - using number of clusters found? and VAF
+# how to tell driver mutations? also check their own VAFs
+# also do this same analysis per patient instead of all (as code above) - done
+# explanation of the counts produced vs the output received for each gene? - done
+#calc statistical chance and count of subclones - done
+# read on fragmentomics and epigenomics of subclones
+# plot a vaf density plots for all sample, vaf on the x axis and density on the y (compare for Illumina, cfDNA and BM) - done
+
+```
+
+
+```{r}
+#Sample by sample ID
+# ============================================================================
+# VAF DISTRIBUTION ANALYSIS BY SAMPLE ID
+# Publication-Ready Workflow
+# Tracks: (1) Within-sample consistency, (2) Cross-platform concordance
+# ============================================================================
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(ggridges)
+library(patchwork)
+
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("VAF DISTRIBUTION ANALYSIS: SAMPLE-LEVEL TRACKING\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+# ============================================================================
+# STEP 1: PREPARE DATA - ADD SAMPLE GROUP
+# ============================================================================
+
+cat("STEP 1: Preparing data and extracting sample identifiers...\n\n")
+
+# Extract sample group (first 5 characters, e.g., "ZC-05" from "ZC-05-01")
+vaf_data_processed <- vaf_data %>%
+  dplyr::mutate(
+    sample_group = stringr::str_extract(sample_id, "^[A-Z]{2}-\\d{2}"),
+    vaf_pct = vaf / 100,
+    vaf_segment = dplyr::case_when(
+      vaf_pct < 0.15 ~ "0-15% (Subclonal)",
+      vaf_pct >= 0.15 & vaf_pct < 0.50 ~ "15-50% (Minor Clonal)",
+      vaf_pct >= 0.50 ~ "50-100% (Major Clonal)"
+    ),
+    vaf_segment = factor(vaf_segment, 
+                         levels = c("0-15% (Subclonal)", 
+                                   "15-50% (Minor Clonal)", 
+                                   "50-100% (Major Clonal)"))
+  ) %>%
+  dplyr::filter(!is.na(sample_group), !is.na(vaf_pct), is.finite(vaf_pct))
+
+cat("✓ Data processed\n")
+cat("  Unique sample groups:", dplyr::n_distinct(vaf_data_processed$sample_group), "\n")
+cat("  Unique samples:", dplyr::n_distinct(vaf_data_processed$sample_id), "\n")
+cat("  Data types present:", paste(unique(vaf_data_processed$data_type), collapse = ", "), "\n\n")
+
+# ============================================================================
+# STEP 2: SUMMARY STATISTICS BY SAMPLE GROUP & DATA TYPE
+# ============================================================================
+
+cat("STEP 2: Computing summary statistics...\n\n")
+
+sample_summary <- vaf_data_processed %>%
+  dplyr::group_by(sample_group, data_type, vaf_segment) %>%
+  dplyr::summarise(
+    n_variants = dplyr::n(),
+    mean_vaf = round(mean(vaf_pct, na.rm = TRUE) * 100, 2),
+    median_vaf = round(median(vaf_pct, na.rm = TRUE) * 100, 2),
+    sd_vaf = round(sd(vaf_pct, na.rm = TRUE) * 100, 2),
+    q25_vaf = round(quantile(vaf_pct, 0.25, na.rm = TRUE) * 100, 2),
+    q75_vaf = round(quantile(vaf_pct, 0.75, na.rm = TRUE) * 100, 2),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(sample_group, data_type, vaf_segment)
+
+cat("✓ Summary statistics computed\n\n")
+
+# Save summary table
+write.table(sample_summary,
+            file.path(output_dir, "01_Sample_Summary_Statistics.txt"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
+cat("  Saved: 01_Sample_Summary_Statistics.txt\n\n")
+
+# ============================================================================
+# STEP 3: WITHIN-SAMPLE CONSISTENCY (Same group, same data type)
+# ============================================================================
+
+cat("STEP 3: Analyzing within-sample consistency...\n\n")
+
+# Get sample groups with multiple replicates
+multi_replicate_groups <- vaf_data_processed %>%
+  dplyr::group_by(sample_group, data_type) %>%
+  dplyr::summarise(n_replicates = dplyr::n_distinct(sample_id), .groups = "drop") %>%
+  dplyr::filter(n_replicates > 1)
+
+cat("Sample groups with multiple replicates:\n")
+print(multi_replicate_groups)
+cat("\n")
+
+# Compute correlation within groups
+within_sample_consistency <- tibble()
+
+for (i in 1:nrow(multi_replicate_groups)) {
+  sg <- multi_replicate_groups$sample_group[i]
+  dt <- multi_replicate_groups$data_type[i]
+  
+  # Get all samples in this group/datatype
+  samples_in_group <- vaf_data_processed %>%
+    dplyr::filter(sample_group == sg, data_type == dt) %>%
+    dplyr::pull(sample_id) %>%
+    unique()
+  
+  if (length(samples_in_group) >= 2) {
+    # Compare first two replicates
+    rep1 <- vaf_data_processed %>%
+      dplyr::filter(sample_id == samples_in_group[1]) %>%
+      dplyr::pull(vaf_pct)
+    
+    rep2 <- vaf_data_processed %>%
+      dplyr::filter(sample_id == samples_in_group[2]) %>%
+      dplyr::pull(vaf_pct)
+    
+    if (length(rep1) > 10 & length(rep2) > 10) {
+      # Compute correlation on overlapping VAF bins
+      cor_val <- cor(rep1[1:min(length(rep1), length(rep2))],
+                     rep2[1:min(length(rep1), length(rep2))],
+                     use = "complete.obs")
+      
+      within_sample_consistency <- dplyr::bind_rows(
+        within_sample_consistency,
+        tibble(
+          sample_group = sg,
+          data_type = dt,
+          replicate_1 = samples_in_group[1],
+          replicate_2 = samples_in_group[2],
+          n_variants_rep1 = length(rep1),
+          n_variants_rep2 = length(rep2),
+          correlation = round(cor_val, 4),
+          mean_vaf_rep1 = round(mean(rep1, na.rm = TRUE) * 100, 2),
+          mean_vaf_rep2 = round(mean(rep2, na.rm = TRUE) * 100, 2)
+        )
+      )
+    }
+  }
+}
+
+cat("Within-sample replicability:\n")
+print(within_sample_consistency)
+cat("\n")
+
+write.table(within_sample_consistency,
+            file.path(output_dir, "02_Within_Sample_Consistency.txt"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
+cat("  Saved: 02_Within_Sample_Consistency.txt\n\n")
+
+# ============================================================================
+# STEP 4: CROSS-PLATFORM CONCORDANCE (Same sample, different data types)
+# ============================================================================
+
+cat("STEP 4: Analyzing cross-platform concordance...\n\n")
+
+# Find samples present in multiple data types
+sample_x_datatype <- vaf_data_processed %>%
+  dplyr::group_by(sample_id) %>%
+  dplyr::summarise(n_datatypes = dplyr::n_distinct(data_type), .groups = "drop") %>%
+  dplyr::filter(n_datatypes > 1)
+
+cat("Samples with multiple data types:", nrow(sample_x_datatype), "\n\n")
+
+cross_platform_concordance <- tibble()
+
+for (sid in sample_x_datatype$sample_id) {
+  datatypes_for_sample <- vaf_data_processed %>%
+    dplyr::filter(sample_id == sid) %>%
+    dplyr::pull(data_type) %>%
+    unique()
+  
+  if (length(datatypes_for_sample) == 2) {
+    dt1 <- datatypes_for_sample[1]
+    dt2 <- datatypes_for_sample[2]
+    
+    vaf1 <- vaf_data_processed %>%
+      dplyr::filter(sample_id == sid, data_type == dt1) %>%
+      dplyr::pull(vaf_pct)
+    
+    vaf2 <- vaf_data_processed %>%
+      dplyr::filter(sample_id == sid, data_type == dt2) %>%
+      dplyr::pull(vaf_pct)
+    
+    if (length(vaf1) > 10 & length(vaf2) > 10) {
+      # Compute correlation
+      cor_val <- cor(vaf1[1:min(length(vaf1), length(vaf2))],
+                     vaf2[1:min(length(vaf1), length(vaf2))],
+                     use = "complete.obs")
+      
+      cross_platform_concordance <- dplyr::bind_rows(
+        cross_platform_concordance,
+        tibble(
+          sample_id = sid,
+          sample_group = stringr::str_extract(sid, "^[A-Z]{2}-\\d{2}"),
+          platform_1 = dt1,
+          platform_2 = dt2,
+          n_variants_p1 = length(vaf1),
+          n_variants_p2 = length(vaf2),
+          correlation = round(cor_val, 4),
+          mean_vaf_p1 = round(mean(vaf1, na.rm = TRUE) * 100, 2),
+          mean_vaf_p2 = round(mean(vaf2, na.rm = TRUE) * 100, 2),
+          vaf_diff_mean = round(abs(mean(vaf1, na.rm = TRUE) - mean(vaf2, na.rm = TRUE)) * 100, 2)
+        )
+      )
+    }
+  }
+}
+
+cat("Cross-platform concordance:\n")
+print(cross_platform_concordance %>% dplyr::select(sample_id, platform_1, platform_2, correlation, vaf_diff_mean))
+cat("\n")
+
+write.table(cross_platform_concordance,
+            file.path(output_dir, "03_Cross_Platform_Concordance.txt"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
+cat("  Saved: 03_Cross_Platform_Concordance.txt\n\n")
+
+# ============================================================================
+# STEP 5: FIGURE 1 - VAF DISTRIBUTIONS BY SAMPLE GROUP (WITHIN DATA TYPE)
+# ============================================================================
+
+cat("STEP 5: Generating Figure 1 - Within-sample distributions...\n\n")
+
+# Filter to most abundant sample groups
+top_sample_groups <- vaf_data_processed %>%
+  dplyr::group_by(sample_group) %>%
+  dplyr::summarise(n = dplyr::n(), .groups = "drop") %>%
+  dplyr::arrange(dplyr::desc(n)) %>%
+  dplyr::slice(1:4) %>%  # Top 4 sample groups
+  dplyr::pull(sample_group)
+
+p_within_sample <- vaf_data_processed %>%
+  dplyr::filter(sample_group %in% top_sample_groups) %>%
+  ggplot(aes(x = vaf_pct * 100, fill = sample_id, color = sample_id)) +
+  geom_density(alpha = 0.3, linewidth = 0.8) +
+  facet_wrap(~sample_group + data_type, ncol = 3, scales = "free_y") +
+  labs(
+    x = "VAF (%)",
+    y = "Density",
+    title = "Within-Sample VAF Consistency",
+    subtitle = "Replicates of same sample group across data types"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 13, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40"),
+    axis.text = element_text(size = 8),
+    legend.position = "bottom",
+    legend.text = element_text(size = 8),
+    strip.text = element_text(face = "bold", size = 9),
+    panel.grid.minor = element_blank()
+  )
+
+ggsave(file.path(output_dir, "Fig1_Within_Sample_Distributions.pdf"),
+       p_within_sample, width = 14, height = 10, dpi = 300)
+ggsave(file.path(output_dir, "Fig1_Within_Sample_Distributions.png"),
+       p_within_sample, width = 14, height = 10, dpi = 300)
+cat("  ✓ Fig1_Within_Sample_Distributions saved\n\n")
+
+# ============================================================================
+# STEP 6: FIGURE 2 - CROSS-PLATFORM COMPARISON (SAME SAMPLE)
+# ============================================================================
+
+cat("STEP 6: Generating Figure 2 - Cross-platform concordance...\n\n")
+
+# Get samples with multiple data types
+samples_multiplatform <- cross_platform_concordance %>%
+  dplyr::distinct(sample_id) %>%
+  dplyr::pull(sample_id)
+
+if (length(samples_multiplatform) > 0) {
+  p_cross_platform <- vaf_data_processed %>%
+    dplyr::filter(sample_id %in% samples_multiplatform[1:min(6, length(samples_multiplatform))]) %>%
+    ggplot(aes(x = vaf_pct * 100, fill = data_type, color = data_type)) +
+    geom_density(alpha = 0.35, linewidth = 1) +
+    facet_wrap(~sample_id, ncol = 3, scales = "free_y") +
+    scale_fill_manual(
+      values = c("BM" = "#1f77b4", "Illumina_cfDNA" = "#2ca02c", "Ultima_cfDNA" = "#ff7f0e"),
+      name = "Data Type"
+    ) +
+    scale_color_manual(
+      values = c("BM" = "#1f77b4", "Illumina_cfDNA" = "#2ca02c", "Ultima_cfDNA" = "#ff7f0e"),
+      name = "Data Type"
+    ) +
+    labs(
+      x = "VAF (%)",
+      y = "Density",
+      title = "Cross-Platform VAF Concordance",
+      subtitle = "Same sample, different sequencing platforms"
+    ) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 13, face = "bold"),
+      plot.subtitle = element_text(size = 10, color = "grey40"),
+      axis.text = element_text(size = 8),
+      legend.position = "bottom",
+      strip.text = element_text(face = "bold", size = 10),
+      panel.grid.minor = element_blank()
+    )
+  
+  ggsave(file.path(output_dir, "Fig2_Cross_Platform_Concordance.pdf"),
+         p_cross_platform, width = 14, height = 9, dpi = 300)
+  ggsave(file.path(output_dir, "Fig2_Cross_Platform_Concordance.png"),
+         p_cross_platform, width = 14, height = 9, dpi = 300)
+  cat("  ✓ Fig2_Cross_Platform_Concordance saved\n\n")
+}
+
+# ============================================================================
+# STEP 7: FIGURE 3 - SAMPLE GROUP COMPARISON (SAME DATA TYPE)
+# ============================================================================
+
+cat("STEP 7: Generating Figure 3 - Sample group comparison...\n\n")
+
+p_sample_group <- vaf_data_processed %>%
+  dplyr::filter(sample_group %in% top_sample_groups) %>%
+  ggplot(aes(x = vaf_pct * 100, y = sample_group, fill = vaf_segment)) +
+  geom_density_ridges(alpha = 0.6, scale = 2, color = "white", linewidth = 0.5) +
+  facet_wrap(~data_type, nrow = 1) +
+  scale_fill_manual(
+    values = c("0-15% (Subclonal)" = "#e41a1c",
+               "15-50% (Minor Clonal)" = "#377eb8",
+               "50-100% (Major Clonal)" = "#4daf4a"),
+    name = "VAF Segment"
+  ) +
+  labs(
+    x = "VAF (%)",
+    y = "Sample Group",
+    title = "VAF Distribution Patterns by Sample Group",
+    subtitle = "Ridge plots colored by VAF segment"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 13, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40"),
+    axis.text.y = element_text(face = "bold", size = 11),
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 11),
+    panel.grid.minor = element_blank()
+  )
+
+ggsave(file.path(output_dir, "Fig3_Sample_Group_Ridge_Plots.pdf"),
+       p_sample_group, width = 14, height = 7, dpi = 300)
+ggsave(file.path(output_dir, "Fig3_Sample_Group_Ridge_Plots.png"),
+       p_sample_group, width = 14, height = 7, dpi = 300)
+cat("  ✓ Fig3_Sample_Group_Ridge_Plots saved\n\n")
+
+# ============================================================================
+# STEP 8: FIGURE 4 - CONCORDANCE HEATMAP
+# ============================================================================
+
+cat("STEP 8: Generating Figure 4 - Concordance visualization...\n\n")
+
+if (nrow(cross_platform_concordance) > 0) {
+  p_concordance_scatter <- cross_platform_concordance %>%
+    ggplot(aes(x = reorder(sample_id, correlation), y = correlation, 
+               color = platform_1, size = n_variants_p1)) +
+    geom_point(alpha = 0.7) +
+    geom_hline(yintercept = median(cross_platform_concordance$correlation, na.rm = TRUE),
+               linetype = "dashed", color = "red", alpha = 0.5) +
+    scale_color_manual(
+      values = c("BM" = "#1f77b4", "Illumina_cfDNA" = "#2ca02c", "Ultima_cfDNA" = "#ff7f0e"),
+      name = "Platform"
+    ) +
+    scale_size_continuous(name = "# Variants") +
+    coord_flip() +
+    labs(
+      x = "Sample",
+      y = "Correlation (Platform Concordance)",
+      title = "Cross-Platform VAF Concordance by Sample",
+      subtitle = "Red dashed line = median correlation"
+    ) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 13, face = "bold"),
+      plot.subtitle = element_text(size = 10, color = "grey40"),
+      axis.text.y = element_text(size = 8),
+      legend.position = "bottom"
+    )
+  
+  ggsave(file.path(output_dir, "Fig4_Concordance_Scatter.pdf"),
+         p_concordance_scatter, width = 10, height = 8, dpi = 300)
+  ggsave(file.path(output_dir, "Fig4_Concordance_Scatter.png"),
+         p_concordance_scatter, width = 10, height = 8, dpi = 300)
+  cat("  ✓ Fig4_Concordance_Scatter saved\n\n")
+}
+
+# ============================================================================
+# STEP 9: COMPREHENSIVE SUMMARY REPORT
+# ============================================================================
+
+cat("STEP 9: Generating comprehensive summary report...\n\n")
+
+sink(file.path(output_dir, "00_ANALYSIS_SUMMARY.txt"))
+
+cat("╔═══════════════════════════════════════════════════════════════════════╗\n")
+cat("║     VAF DISTRIBUTION ANALYSIS: SAMPLE-LEVEL TRACKING                 ║\n")
+cat("║                Publication-Ready Report                              ║\n")
+cat("╚═══════════════════════════════════════════════════════════════════════╝\n\n")
+
+cat("OVERVIEW\n")
+cat("────────────────────────────────────────────────────────────────────────\n")
+cat("This analysis tracks VAF (Variant Allele Frequency) distributions\n")
+cat("across multiple samples and sequencing platforms to assess:\n")
+cat("  1. Within-sample consistency (replicate agreement)\n")
+cat("  2. Cross-platform concordance (BM vs cfDNA platforms)\n")
+cat("  3. Sample group patterns and clonal heterogeneity\n\n")
+
+cat("DATASET SUMMARY\n")
+cat("────────────────────────────────────────────────────────────────────────\n")
+cat("Total variants analyzed:", dplyr::n_distinct(vaf_data_processed$chr), "\n")
+cat("Unique samples:", dplyr::n_distinct(vaf_data_processed$sample_id), "\n")
+cat("Unique sample groups:", dplyr::n_distinct(vaf_data_processed$sample_group), "\n")
+cat("Data types:", paste(unique(vaf_data_processed$data_type), collapse = ", "), "\n\n")
+
+cat("KEY FINDINGS\n")
+cat("────────────────────────────────────────────────────────────────────────\n")
+
+# Within-sample consistency
+if (nrow(within_sample_consistency) > 0) {
+  mean_corr_within <- mean(within_sample_consistency$correlation, na.rm = TRUE)
+  cat("1. WITHIN-SAMPLE CONSISTENCY\n")
+  cat("   Mean correlation between replicates: ", round(mean_corr_within, 3), "\n")
+  cat("   Interpretation: ", 
+      ifelse(mean_corr_within > 0.9, "Excellent", 
+             ifelse(mean_corr_within > 0.8, "Good", 
+                    ifelse(mean_corr_within > 0.7, "Moderate", "Poor"))), 
+      " replicability\n\n")
+}
+
+# Cross-platform concordance
+if (nrow(cross_platform_concordance) > 0) {
+  mean_corr_cross <- mean(cross_platform_concordance$correlation, na.rm = TRUE)
+  mean_vaf_diff <- mean(cross_platform_concordance$vaf_diff_mean, na.rm = TRUE)
+  cat("2. CROSS-PLATFORM CONCORDANCE\n")
+  cat("   Mean correlation across platforms: ", round(mean_corr_cross, 3), "\n")
+  cat("   Mean VAF difference: ", round(mean_vaf_diff, 2), "%\n")
+  cat("   Interpretation: ",
+      ifelse(mean_corr_cross > 0.8, "Strong", 
+             ifelse(mean_corr_cross > 0.6, "Moderate", "Weak")),
+      " platform concordance\n\n")
+  
+  # Platform-specific analysis
+  for (dt in unique(cross_platform_concordance$platform_1)) {
+    dt_data <- cross_platform_concordance %>%
+      dplyr::filter(platform_1 == dt)
+    if (nrow(dt_data) > 0) {
+      cat("   Platform: ", dt, " (n=", nrow(dt_data), " samples)\n")
+      cat("     Mean correlation: ", round(mean(dt_data$correlation, na.rm = TRUE), 3), "\n")
+    }
+  }
+  cat("\n")
+}
+
+# VAF segment distribution
+vaf_seg_dist <- vaf_data_processed %>%
+  dplyr::group_by(data_type, vaf_segment) %>%
+  dplyr::summarise(pct = round(dplyr::n() / dplyr::n_distinct(data_type) * 100, 1), .groups = "drop")
+
+cat("3. VAF SEGMENT DISTRIBUTION\n")
+for (dt in unique(vaf_seg_dist$data_type)) {
+  cat("   ", dt, ":\n")
+  seg_data <- vaf_seg_dist %>% dplyr::filter(data_type == dt)
+  for (i in 1:nrow(seg_data)) {
+    cat("     ", seg_data$vaf_segment[i], ": ", seg_data$pct[i], "%\n")
+  }
+}
+cat("\n")
+
+cat("FILES GENERATED\n")
+cat("────────────────────────────────────────────────────────────────────────\n")
+cat("Summary Tables:\n")
+cat("  • 01_Sample_Summary_Statistics.txt\n")
+cat("  • 02_Within_Sample_Consistency.txt\n")
+cat("  • 03_Cross_Platform_Concordance.txt\n\n")
+cat("Figures:\n")
+cat("  • Fig1_Within_Sample_Distributions.pdf/png\n")
+cat("  • Fig2_Cross_Platform_Concordance.pdf/png\n")
+cat("  • Fig3_Sample_Group_Ridge_Plots.pdf/png\n")
+cat("  • Fig4_Concordance_Scatter.pdf/png\n\n")
+
+cat("INTERPRETATION GUIDELINES\n")
+cat("────────────────────────────────────────────────────────────────────────\n")
+cat("Correlation > 0.9:  Excellent concordance / replicability\n")
+cat("Correlation 0.8-0.9: Good concordance\n")
+cat("Correlation 0.7-0.8: Moderate concordance\n")
+cat("Correlation < 0.7:  Poor concordance (investigate sources)\n\n")
+
+cat("╔═══════════════════════════════════════════════════════════════════════╗\n")
+cat("Report generated:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
+cat("╚═══════════════════════════════════════════════════════════════════════╝\n")
+
+sink()
+
+cat("✓ Comprehensive summary saved: 00_ANALYSIS_SUMMARY.txt\n\n")
+
+# ============================================================================
+# FINAL OUTPUT SUMMARY
+# ============================================================================
+
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("ANALYSIS COMPLETE!\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+cat("All outputs saved to:", output_dir, "\n\n")
+cat("DELIVERABLES:\n")
+cat("  ✓ 1 comprehensive summary report\n")
+cat("  ✓ 3 data summary tables\n")
+cat("  ✓ 4 publication-ready figures (PDF + PNG)\n")
+cat("  ✓ Complete statistical analysis\n\n")
+
+cat("═══════════════════════════════════════════════════════════════════════\n")
+
+```
+
+```{r}
+#Continued temporal dynamics plot
+# ============================================================================
+# BONUS: TEMPORAL DYNAMICS PLOT
+# VAF Changes Across Timepoints for Same Patient
+# ============================================================================
+
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("BONUS STEP: TEMPORAL DYNAMICS - VAF CHANGES ACROSS TIMEPOINTS\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+# ============================================================================
+# STEP 1: IDENTIFY SAMPLES WITH TEMPORAL DATA
+# ============================================================================
+
+cat("STEP 1: Identifying patients with multiple timepoints...\n\n")
+
+# Extract patient ID (first 5 chars: CA-08, ZC-05, etc.)
+temporal_data <- vaf_data_processed %>%
+  dplyr::mutate(
+    patient_id = stringr::str_extract(sample_id, "^[A-Z]{2}-\\d{2}"),
+    timepoint = stringr::str_extract(sample_id, "[0-9]{2}$|R$")  # e.g., 01, 03, 07, R
+  ) %>%
+  dplyr::filter(!is.na(patient_id), !is.na(timepoint))
+
+# Find patients with multiple timepoints
+patients_temporal <- temporal_data %>%
+  dplyr::group_by(patient_id, data_type) %>%
+  dplyr::summarise(
+    n_timepoints = dplyr::n_distinct(timepoint),
+    timepoints = paste(sort(unique(timepoint)), collapse = ", "),
+    n_samples = dplyr::n_distinct(sample_id),
+    .groups = "drop"
+  ) %>%
+  dplyr::filter(n_timepoints >= 2) %>%
+  dplyr::arrange(patient_id, dplyr::desc(n_timepoints))
+
+cat("Patients with temporal \n")
+print(patients_temporal)
+cat("\n")
+
+if (nrow(patients_temporal) == 0) {
+  cat("⚠ WARNING: No patients found with multiple timepoints\n")
+  cat("   Ensure sample_id format allows timepoint extraction\n")
+  cat("   Expected format: XX-##-TP (e.g., CA-08-01, CA-08-03, CA-08-R)\n\n")
+} else {
+  
+  # ============================================================================
+  # STEP 2: CREATE TIMEPOINT ORDERING
+  # ============================================================================
+  
+  cat("STEP 2: Creating temporal ordering...\n\n")
+  
+  # Create numeric ordering for timepoints (01 < 03 < 07 < R)
+  temporal_order <- function(tp) {
+    if (tp == "R" | tp == "r") return(999)  # Relapse at end
+    return(as.numeric(tp))
+  }
+  
+  temporal_data <- temporal_data %>%
+    dplyr::mutate(
+      timepoint_numeric = sapply(timepoint, temporal_order),
+      timepoint_label = dplyr::case_when(
+        timepoint == "R" ~ "Relapse",
+        TRUE ~ paste0("TP", timepoint)
+      ),
+      timepoint_factor = factor(timepoint_label, 
+                               levels = sort(unique(timepoint_label)))
+    )
+  
+  # ============================================================================
+  # STEP 3: FIGURE 5A - DENSITY PLOTS ACROSS TIMEPOINTS
+  # ============================================================================
+  
+  cat("STEP 3: Generating Figure 5A - Temporal density plots...\n\n")
+  
+  # Get top 3 patients with most temporal data
+  top_temporal_patients <- patients_temporal %>%
+    dplyr::arrange(dplyr::desc(n_timepoints)) %>%
+    dplyr::slice(1:3) %>%
+    dplyr::pull(patient_id)
+  
+  # Create custom color palette for timepoints
+  timepoint_colors <- c(
+    "TP01" = "#1b9e77",
+    "TP02" = "#d95f02",
+    "TP03" = "#7570b3",
+    "TP04" = "#e7298a",
+    "TP05" = "#66a61e",
+    "TP06" = "#e6ab02",
+    "TP07" = "#a6761d",
+    "TP08" = "#666666",
+    "TP09" = "#1b9e77",
+    "Relapse" = "#d62728"
+  )
+  
+  p5a_temporal_density <- temporal_data %>%
+    dplyr::filter(patient_id %in% top_temporal_patients) %>%
+    ggplot(aes(x = vaf_pct * 100, fill = timepoint_label, color = timepoint_label)) +
+    geom_density(alpha = 0.35, linewidth = 1, adjust = 1.5) +
+    facet_wrap(~patient_id + data_type, ncol = 3, scales = "free_y") +
+    scale_fill_manual(
+      values = timepoint_colors,
+      name = "Timepoint"
+    ) +
+    scale_color_manual(
+      values = timepoint_colors,
+      name = "Timepoint"
+    ) +
+    labs(
+      x = "VAF (%)",
+      y = "Density",
+      title = "Temporal VAF Dynamics: Patient Samples Across Timepoints",
+      subtitle = "Evolution of clonal structure over time"
+    ) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 13, face = "bold"),
+      plot.subtitle = element_text(size = 10, color = "grey40"),
+      axis.text = element_text(size = 9),
+      legend.position = "bottom",
+      legend.text = element_text(size = 9),
+      strip.text = element_text(face = "bold", size = 10),
+      panel.grid.minor = element_blank()
+    )
+  
+  ggsave(file.path(output_dir, "Fig5a_Temporal_Density_Plots.pdf"),
+         p5a_temporal_density, width = 15, height = 10, dpi = 300)
+  ggsave(file.path(output_dir, "Fig5a_Temporal_Density_Plots.png"),
+         p5a_temporal_density, width = 15, height = 10, dpi = 300)
+  cat("  ✓ Fig5a_Temporal_Density_Plots saved\n\n")
+  
+  # ============================================================================
+  # STEP 4: FIGURE 5B - RIDGE PLOTS (TIMEPOINT COMPARISON)
+  # ============================================================================
+  
+  cat("STEP 4: Generating Figure 5B - Temporal ridge plots...\n\n")
+  
+  p5b_temporal_ridge <- temporal_data %>%
+    dplyr::filter(patient_id %in% top_temporal_patients[1:2]) %>%
+    ggplot(aes(x = vaf_pct * 100, y = timepoint_label, fill = vaf_segment)) +
+    geom_density_ridges(alpha = 0.6, scale = 2.5, color = "white", linewidth = 0.5) +
+    facet_wrap(~patient_id + data_type, ncol = 2) +
+    scale_fill_manual(
+      values = c("0-15% (Subclonal)" = "#e41a1c",
+                 "15-50% (Minor Clonal)" = "#377eb8",
+                 "50-100% (Major Clonal)" = "#4daf4a"),
+      name = "VAF Segment"
+    ) +
+    labs(
+      x = "VAF (%)",
+      y = "Timepoint",
+      title = "Clonal Architecture Across Timepoints",
+      subtitle = "Ridge plots reveal temporal evolution of VAF segments"
+    ) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 13, face = "bold"),
+      plot.subtitle = element_text(size = 10, color = "grey40"),
+      axis.text.y = element_text(face = "bold", size = 11),
+      legend.position = "bottom",
+      strip.text = element_text(face = "bold", size = 11),
+      panel.grid.minor = element_blank()
+    )
+  
+  ggsave(file.path(output_dir, "Fig5b_Temporal_Ridge_Plots.pdf"),
+         p5b_temporal_ridge, width = 12, height = 9, dpi = 300)
+  ggsave(file.path(output_dir, "Fig5b_Temporal_Ridge_Plots.png"),
+         p5b_temporal_ridge, width = 12, height = 9, dpi = 300)
+  cat("  ✓ Fig5b_Temporal_Ridge_Plots saved\n\n")
+  
+  # ============================================================================
+  # STEP 5: FIGURE 5C - MEDIAN VAF TRAJECTORY
+  # ============================================================================
+  
+  cat("STEP 5: Generating Figure 5C - Median VAF trajectories...\n\n")
+  
+  temporal_summary <- temporal_data %>%
+    dplyr::group_by(patient_id, data_type, timepoint_label, timepoint_numeric) %>%
+    dplyr::summarise(
+      median_vaf = median(vaf_pct * 100, na.rm = TRUE),
+      mean_vaf = mean(vaf_pct * 100, na.rm = TRUE),
+      sd_vaf = sd(vaf_pct * 100, na.rm = TRUE),
+      n_variants = dplyr::n(),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(patient_id, data_type, timepoint_numeric)
+  
+  p5c_trajectory <- temporal_summary %>%
+    dplyr::filter(patient_id %in% top_temporal_patients) %>%
+    ggplot(aes(x = reorder(timepoint_label, timepoint_numeric), y = median_vaf, 
+               color = data_type, group = data_type)) +
+    geom_line(linewidth = 1.2, alpha = 0.7) +
+    geom_point(aes(size = n_variants), alpha = 0.8) +
+    geom_errorbar(aes(ymin = mean_vaf - sd_vaf, ymax = mean_vaf + sd_vaf),
+                  width = 0.2, alpha = 0.5) +
+    facet_wrap(~patient_id, ncol = 2) +
+    scale_color_manual(
+      values = c("BM" = "#1f77b4", "Illumina_cfDNA" = "#2ca02c", "Ultima_cfDNA" = "#ff7f0e"),
+      name = "Data Type"
+    ) +
+    scale_size_continuous(name = "# Variants", range = c(2, 8)) +
+    labs(
+      x = "Timepoint",
+      y = "Median VAF (%)",
+      title = "Median VAF Trajectory Across Timepoints",
+      subtitle = "Points sized by variant count; error bars show ±1 SD"
+    ) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 13, face = "bold"),
+      plot.subtitle = element_text(size = 10, color = "grey40"),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "bottom",
+      strip.text = element_text(face = "bold", size = 11),
+      panel.grid.minor = element_blank()
+    )
+  
+  ggsave(file.path(output_dir, "Fig5c_Median_VAF_Trajectory.pdf"),
+         p5c_trajectory, width = 12, height = 8, dpi = 300)
+  ggsave(file.path(output_dir, "Fig5c_Median_VAF_Trajectory.png"),
+         p5c_trajectory, width = 12, height = 8, dpi = 300)
+  cat("  ✓ Fig5c_Median_VAF_Trajectory saved\n\n")
+  
+  # ============================================================================
+  # STEP 6: FIGURE 5D - VAF SEGMENT DYNAMICS
+  # ============================================================================
+  
+  cat("STEP 6: Generating Figure 5D - VAF segment dynamics...\n\n")
+  
+  segment_dynamics <- temporal_data %>%
+    dplyr::filter(patient_id %in% top_temporal_patients) %>%
+    dplyr::group_by(patient_id, data_type, timepoint_label, timepoint_numeric, vaf_segment) %>%
+    dplyr::summarise(
+      pct_variants = round(dplyr::n() / dplyr::n_distinct(sample_id) * 100, 1),
+      n_variants = dplyr::n(),
+      .groups = "drop"
+    )
+  
+  p5d_segment_dynamics <- segment_dynamics %>%
+    ggplot(aes(x = reorder(timepoint_label, timepoint_numeric), y = pct_variants,
+               fill = vaf_segment, color = vaf_segment)) +
+    geom_bar(stat = "identity", position = "stack", alpha = 0.8, linewidth = 0.5) +
+    facet_wrap(~patient_id + data_type, ncol = 3) +
+    scale_fill_manual(
+      values = c("0-15% (Subclonal)" = "#e41a1c",
+                 "15-50% (Minor Clonal)" = "#377eb8",
+                 "50-100% (Major Clonal)" = "#4daf4a"),
+      name = "VAF Segment"
+    ) +
+    scale_color_manual(
+      values = c("0-15% (Subclonal)" = "#8b0000",
+                 "15-50% (Minor Clonal)" = "#0c2c6b",
+                 "50-100% (Major Clonal)" = "#2d6b1a"),
+      guide = "none"
+    ) +
+    labs(
+      x = "Timepoint",
+      y = "% Variants",
+      title = "Clonal Composition Dynamics",
+      subtitle = "Proportion of variants in each VAF segment over time"
+    ) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 13, face = "bold"),
+      plot.subtitle = element_text(size = 10, color = "grey40"),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "bottom",
+      strip.text = element_text(face = "bold", size = 9),
+      panel.grid.minor = element_blank()
+    )
+  
+  ggsave(file.path(output_dir, "Fig5d_Segment_Dynamics.pdf"),
+         p5d_segment_dynamics, width = 15, height = 9, dpi = 300)
+  ggsave(file.path(output_dir, "Fig5d_Segment_Dynamics.png"),
+         p5d_segment_dynamics, width = 15, height = 9, dpi = 300)
+  cat("  ✓ Fig5d_Segment_Dynamics saved\n\n")
+  
+  # ============================================================================
+  # STEP 7: SAVE TEMPORAL SUMMARY TABLE
+  # ============================================================================
+  
+  cat("STEP 7: Saving temporal analysis table...\n\n")
+  
+  write.table(temporal_summary,
+              file.path(output_dir, "04_Temporal_Summary_Statistics.txt"),
+              sep = "\t", quote = FALSE, row.names = FALSE)
+  cat("  ✓ 04_Temporal_Summary_Statistics.txt saved\n\n")
+  
+  # ============================================================================
+  # STEP 8: CREATE TEMPORAL ANALYSIS REPORT
+  # ============================================================================
+  
+  cat("STEP 8: Generating temporal analysis report...\n\n")
+  
+  sink(file.path(output_dir, "TEMPORAL_ANALYSIS_REPORT.txt"))
+  
+  cat("╔═══════════════════════════════════════════════════════════════════════╗\n")
+  cat("║           TEMPORAL VAF DYNAMICS ANALYSIS REPORT                       ║\n")
+  cat("║        Tracking Clonal Evolution Across Timepoints                   ║\n")
+  cat("╚═══════════════════════════════════════════════════════════════════════╝\n\n")
+  
+  cat("PATIENTS WITH TEMPORAL DATA\n")
+  cat("────────────────────────────────────────────────────────────────────────\n")
+  print(patients_temporal)
+  cat("\n")
+  
+  cat("TEMPORAL TRAJECTORY SUMMARY\n")
+  cat("────────────────────────────────────────────────────────────────────────\n")
+  
+  for (patient in top_temporal_patients) {
+    cat("\nPATIENT:", patient, "\n")
+    cat("─" %+% rep("─", 40) %+% "\n")
+    
+    patient_data <- temporal_summary %>%
+      dplyr::filter(patient_id == patient) %>%
+      dplyr::arrange(data_type, timepoint_numeric)
+    
+    for (dt in unique(patient_data$data_type)) {
+      cat("\n  Data Type: ", dt, "\n")
+      dt_data <- patient_data %>% dplyr::filter(data_type == dt)
+      
+      for (i in 1:nrow(dt_data)) {
+        row <- dt_data[i, ]
+        cat("    ", row$timepoint_label, ": Median VAF = ", round(row$median_vaf, 2), 
+            "% (n=", row$n_variants, " variants)\n")
+      }
+      
+      # Calculate trends
+      if (nrow(dt_data) > 1) {
+        vaf_change <- dt_data$median_vaf[nrow(dt_data)] - dt_data$median_vaf[1]
+        direction <- ifelse(vaf_change > 0, "↑ Increasing", "↓ Decreasing")
+        cat("    Trend: ", direction, " (Δ = ", round(vaf_change, 2), "%)\n")
+      }
+    }
+  }
+  
+  cat("\n\nKEY OBSERVATIONS\n")
+  cat("────────────────────────────────────────────────────────────────────────\n")
+  
+  # Identify increasing/decreasing trends
+  trends <- tibble()
+  for (patient in top_temporal_patients) {
+    for (dt in unique(temporal_summary$data_type)) {
+      patient_dt_data <- temporal_summary %>%
+        dplyr::filter(patient_id == patient, data_type == dt) %>%
+        dplyr::arrange(timepoint_numeric)
+      
+      if (nrow(patient_dt_data) > 1) {
+        vaf_start <- patient_dt_data$median_vaf[1]
+        vaf_end <- patient_dt_data$median_vaf[nrow(patient_dt_data)]
+        pct_change <- ((vaf_end - vaf_start) / vaf_start) * 100
+        
+        trends <- dplyr::bind_rows(
+          trends,
+          tibble(
+            patient_id = patient,
+            data_type = dt,
+            vaf_start = round(vaf_start, 2),
+            vaf_end = round(vaf_end, 2),
+            absolute_change = round(vaf_end - vaf_start, 2),
+            percent_change = round(pct_change, 1),
+            trend = ifelse(vaf_end > vaf_start, "Increasing", "Decreasing")
+          )
+        )
+      }
+    }
+  }
+  
+  cat("VAF Trajectory Summary:\n")
+  print(trends)
+  cat("\n")
+  
+  cat("INTERPRETATION\n")
+  cat("────────────────────────────────────────────────────────────────────────\n")
+  cat("• Increasing VAF: Clone is expanding or becoming more dominant\n")
+  cat("• Decreasing VAF: Clone is being eliminated or becoming minor\n")
+  cat("• Stable VAF: Clone maintains similar burden across timepoints\n")
+  cat("• Relapse (R): May show emergence of new clones or re-expansion\n\n")
+  
+  cat("FILES GENERATED\n")
+  cat("────────────────────────────────────────────────────────────────────────\n")
+  cat("Tables:\n")
+  cat("  • 04_Temporal_Summary_Statistics.txt\n\n")
+  cat("Figures:\n")
+  cat("  • Fig5a_Temporal_Density_Plots.pdf/png\n")
+  cat("  • Fig5b_Temporal_Ridge_Plots.pdf/png\n")
+  cat("  • Fig5c_Median_VAF_Trajectory.pdf/png\n")
+  cat("  • Fig5d_Segment_Dynamics.pdf/png\n\n")
+  
+  cat("╔═══════════════════════════════════════════════════════════════════════╗\n")
+  cat("Report generated:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
+  cat("╚═══════════════════════════════════════════════════════════════════════╝\n")
+  
+  sink()
+  
+  cat("✓ TEMPORAL_ANALYSIS_REPORT.txt saved\n\n")
+  
+  # ============================================================================
+  # FINAL SUMMARY
+  # ============================================================================
+  
+  cat("═══════════════════════════════════════════════════════════════════════\n")
+  cat("TEMPORAL DYNAMICS ANALYSIS COMPLETE!\n")
+  cat("═══════════════════════════════════════════════════════════════════════\n\n")
+  
+  cat("NEW DELIVERABLES:\n")
+  cat("  ✓ 4 Temporal visualization figures\n")
+  cat("  ✓ 1 Temporal summary table\n")
+  cat("  ✓ 1 Comprehensive temporal analysis report\n\n")
+  
+  cat("All files saved to:", output_dir, "\n\n")
+  cat("═══════════════════════════════════════════════════════════════════════\n")
+}
+
+```
+
+```{r}
+#!/usr/bin/env Rscript
+# ============================================================================
+# STEP 0: ADD GENE ANNOTATIONS (CONSISTENT WITH TOP VARIANTS SCRIPT)
+# - Uses Ensembl GRCh38 (version 113)
+# - Uses chromosome_name without "chr" prefix
+# - For each position, assigns the NEAREST gene (HGNC symbol)
+# ============================================================================
+
+library(dplyr)
+library(biomaRt)
+library(stringr)
+library(tibble)
+
+cat("═══════════════════════════════════════════════════════════════════════\n")
+cat("ADDING GENE ANNOTATIONS TO vaf_data_processed (NEAREST GENE, hg38)\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+# ------------------------------------------------------------------------
+# CONFIG
+# ------------------------------------------------------------------------
+
+WINDOW_BP    <- 10000   # ±10kb window for candidate genes (same as top-variants script)
+MAX_DISTANCE <- 500000  # 500kb max distance to still call a 'nearest gene'
+
+cat("Settings:\n")
+cat("  Candidate gene search window: ±", WINDOW_BP / 1000, "kb\n")
+cat("  Max distance for nearest gene: ", MAX_DISTANCE / 1000, "kb\n\n")
+
+# ------------------------------------------------------------------------
+# CHECK INPUT
+# ------------------------------------------------------------------------
+
+if (!exists("vaf_data_processed")) {
+  stop("vaf_data_processed not found in environment.")
+}
+
+required_cols <- c("chr", "genomic_pos")
+missing_cols <- setdiff(required_cols, colnames(vaf_data_processed))
+if (length(missing_cols) > 0) {
+  stop("vaf_data_processed is missing required columns: ",
+       paste(missing_cols, collapse = ", "))
+}
+
+# ------------------------------------------------------------------------
+# STEP 1: CONNECT TO ENSEMBL (hg38, version 113)
+# ------------------------------------------------------------------------
+
+cat("Connecting to Ensembl GRCh38 (version 113)...\n")
+ensembl <- tryCatch({
+  biomaRt::useEnsembl(
+    biomart = "ensembl",
+    dataset = "hsapiens_gene_ensembl",
+    version = 113
+  )
+}, error = function(e) {
+  cat("ERROR: Ensembl connection failed: ", conditionMessage(e), "\n")
+  return(NULL)
+})
+
+if (is.null(ensembl)) {
+  stop("Cannot connect to Ensembl. Check internet connection.")
+}
+
+cat("✓ Connected to Ensembl GRCh38 (v113)\n\n")
+
+# ------------------------------------------------------------------------
+# STEP 2: PREPARE UNIQUE POSITIONS (AND MATCH CHR FORMAT)
+# ------------------------------------------------------------------------
+
+cat("Extracting unique chr:genomic_pos combinations...\n")
+
+unique_positions <- vaf_data_processed %>%
+  distinct(chr, genomic_pos) %>%
+  arrange(chr, genomic_pos)
+
+cat("  Unique positions: ", nrow(unique_positions), "\n\n")
+
+# We assume `chr` is already in a form like "1", "2", ..., "X", "Y", "MT"
+# If it might contain a "chr" prefix, strip it:
+unique_positions <- unique_positions %>%
+  mutate(
+    chr_no_prefix = chr %>%
+      as.character() %>%
+      str_replace("^chr", "")  # strip leading "chr" if present
+  )
+
+# ------------------------------------------------------------------------
+# STEP 3: FOR EACH POSITION, FIND NEAREST GENE (LIKE TOP VARIANTS SCRIPT)
+# ------------------------------------------------------------------------
+
+cat("Annotating positions with nearest genes (±", WINDOW_BP, " bp)...\n\n")
+
+# Function: given one row with chr_no_prefix and genomic_pos, get nearest gene
+annotate_one_position <- function(chr_no_prefix, genomic_pos, ensembl, window_bp, max_dist) {
+  # Query ±window_bp around genomic_pos, same attributes as your working script
+  genes <- tryCatch({
+    biomaRt::getBM(
+      attributes = c(
+        "hgnc_symbol", "ensembl_gene_id", "chromosome_name",
+        "start_position", "end_position", "strand", "gene_biotype"
+      ),
+      filters   = c("chromosome_name", "start", "end"),
+      values    = list(
+        chromosome_name = chr_no_prefix,
+        start           = as.numeric(genomic_pos) - window_bp,
+        end             = as.numeric(genomic_pos) + window_bp
+      ),
+      mart = ensembl,
+      useCache = FALSE
+    )
+  }, error = function(e) {
+    return(tibble())
+  })
+
+  if (nrow(genes) == 0) {
+    # No genes in ±window, expand search to max_dist for nearest gene
+    # We fetch all genes on that chromosome once, then compute distances
+    genes_chr <- tryCatch({
+      biomaRt::getBM(
+        attributes = c(
+          "hgnc_symbol", "ensembl_gene_id", "chromosome_name",
+          "start_position", "end_position", "strand", "gene_biotype"
+        ),
+        filters = "chromosome_name",
+        values  = chr_no_prefix,
+        mart    = ensembl,
+        useCache = FALSE
+      )
+    }, error = function(e) {
+      return(tibble())
+    })
+
+    if (nrow(genes_chr) == 0) {
+      # Truly unknown: no genes for that chr
+      return(
+        tibble(
+          gene_name       = NA_character_,
+          gene_id         = NA_character_,
+          gene_chr        = chr_no_prefix,
+          gene_start      = NA_real_,
+          gene_end        = NA_real_,
+          gene_strand     = NA_integer_,
+          gene_biotype    = NA_character_,
+          distance_to_gene = NA_real_,
+          location        = "UNKNOWN"
+        )
+      )
+    }
+
+    # Compute distance to all genes (0 if inside)
+    genes_chr <- genes_chr %>%
+      mutate(
+        distance_to_gene = dplyr::case_when(
+          genomic_pos < start_position ~ start_position - genomic_pos,
+          genomic_pos > end_position   ~ genomic_pos - end_position,
+          TRUE                         ~ 0
+        )
+      )
+
+    # Take nearest
+    nearest <- genes_chr %>% arrange(distance_to_gene) %>% slice(1)
+
+    if (nearest$distance_to_gene[1] > max_dist) {
+      location <- paste0("INTERGENIC (>", max_dist / 1000, "kb)")
+    } else if (nearest$distance_to_gene[1] == 0) {
+      location <- "WITHIN_GENE"
+    } else if (nearest$distance_to_gene[1] < 5000) {
+      location <- "NEAR_GENE (<5kb)"
+    } else if (nearest$distance_to_gene[1] < 50000) {
+      location <- "NEARBY (5-50kb)"
+    } else {
+      location <- "INTERGENIC (>50kb)"
+    }
+
+    return(
+      nearest %>%
+        transmute(
+          gene_name       = hgnc_symbol,
+          gene_id         = ensembl_gene_id,
+          gene_chr        = chromosome_name,
+          gene_start      = start_position,
+          gene_end        = end_position,
+          gene_strand     = strand,
+          gene_biotype    = gene_biotype,
+          distance_to_gene,
+          location
+        )
+    )
+  } else {
+    # We have genes in ±window: compute distance and pick closest, like your script
+    annotated <- genes %>%
+      as_tibble() %>%
+      mutate(
+        distance_to_gene = case_when(
+          genomic_pos < start_position ~ start_position - genomic_pos,
+          genomic_pos > end_position   ~ genomic_pos - end_position,
+          TRUE                         ~ 0
+        )
+      ) %>%
+      arrange(distance_to_gene) %>%
+      slice(1) %>%
+      transmute(
+        gene_name       = hgnc_symbol,
+        gene_id         = ensembl_gene_id,
+        gene_chr        = chromosome_name,
+        gene_start      = start_position,
+        gene_end        = end_position,
+        gene_strand     = strand,
+        gene_biotype    = gene_biotype,
+        distance_to_gene,
+        location = case_when(
+          distance_to_gene == 0           ~ "WITHIN_GENE",
+          distance_to_gene < 5000         ~ "NEAR_GENE (<5kb)",
+          distance_to_gene < 50000        ~ "NEARBY (5-50kb)",
+          TRUE                            ~ "INTERGENIC (>50kb)"
+        )
+      )
+
+    return(annotated)
+  }
+}
+
+# Loop over all unique positions (could be vectorized/batched, but this is clearer)
+gene_annotations <- vector("list", nrow(unique_positions))
+
+for (i in seq_len(nrow(unique_positions))) {
+  row <- unique_positions[i, ]
+  if (i %% 100 == 0 || i == 1) {
+    cat("  Annotating position", i, "of", nrow(unique_positions),
+        ":", row$chr, "@", row$genomic_pos, "\n")
+  }
+
+  ann <- annotate_one_position(
+    chr_no_prefix = row$chr_no_prefix,
+    genomic_pos   = row$genomic_pos,
+    ensembl       = ensembl,
+    window_bp     = WINDOW_BP,
+    max_dist      = MAX_DISTANCE
+  )
+
+  gene_annotations[[i]] <- ann %>%
+    mutate(
+      chr         = row$chr,
+      genomic_pos = row$genomic_pos
+    )
+}
+
+gene_annotations <- bind_rows(gene_annotations)
+
+cat("\nAnnotation complete for all unique positions.\n")
+cat("  Rows in annotation table:", nrow(gene_annotations), "\n\n")
+
+# ------------------------------------------------------------------------
+# STEP 4: MERGE BACK INTO vaf_data_processed
+# ------------------------------------------------------------------------
+
+cat("Merging annotations into vaf_data_processed...\n\n")
+
+vaf_data_processed <- vaf_data_processed %>%
+  left_join(
+    gene_annotations %>%
+      select(
+        chr,
+        genomic_pos,
+        gene_symbol = gene_name,   # <- this is the column your other script uses
+        gene_id,
+        gene_chr,
+        gene_start,
+        gene_end,
+        gene_strand,
+        gene_biotype,
+        distance_to_gene,
+        location
+      ),
+    by = c("chr", "genomic_pos")
+  )
+
+cat("✓ Added columns to vaf_data_processed:\n")
+cat("  - gene_symbol (HGNC)\n")
+cat("  - gene_id (Ensembl)\n")
+cat("  - gene_chr, gene_start, gene_end, gene_strand, gene_biotype\n")
+cat("  - distance_to_gene, location\n\n")
+
+# ------------------------------------------------------------------------
+# STEP 5: QUICK STATS
+# ------------------------------------------------------------------------
+
+cat("Quick summary:\n")
+n_with_gene <- sum(!is.na(vaf_data_processed$gene_symbol) &
+                   vaf_data_processed$gene_symbol != "")
+n_total     <- nrow(vaf_data_processed)
+
+cat("  Variants with assigned gene_symbol:", n_with_gene, "/", n_total,
+    sprintf("(%.1f%%)\n", 100 * n_with_gene / n_total))
+
+cat("  Location breakdown:\n")
+print(table(vaf_data_processed$location, useNA = "ifany"))
+
+cat("\nTop 15 genes:\n")
+print(
+  vaf_data_processed %>%
+    filter(!is.na(gene_symbol), gene_symbol != "") %>%
+    count(gene_symbol, sort = TRUE) %>%
+    head(15)
+)
+
+cat("\n═══════════════════════════════════════════════════════════════════════\n")
+cat("✓ GENE ANNOTATIONS COMPLETE\n")
+cat("Now run: source('02_recurrent_gene_analysis.R')\n")
+cat("═══════════════════════════════════════════════════════════════════════\n\n")
+
+```
+
+
+

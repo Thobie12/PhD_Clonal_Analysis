@@ -1,0 +1,241 @@
+---
+title: "Aim1_Dive"
+output: html_document
+date: "2026-01-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+
+# Load and read file with driver genes from Table S2 - https://doi.org/10.1038/s41588-025-02196-0
+library(dplyr)
+Driver_gene <- read.csv("~/Desktop/UofT/PhD/Pugh Lab/Driver_Genes.csv")
+MM_Gene_list <- Driver_gene %>%
+  transmute(gene, category = "driver")
+```
+
+```{r}
+#DNDSCV
+
+#Installing package
+library(devtools)
+#install_github("im3sanger/dndscv")
+library("dndscv")
+```
+
+```{r}
+#dndSCV code for all samples
+library(data.table)
+maf_files <- list.files(path="~/Desktop/MAFs", pattern = "\\.maf$", full.names = TRUE)
+for (f in maf_files) {
+maf <- fread(f)
+maf <- maf[, .(
+  Tumor_Sample_Barcode,
+  Chromosome,
+  Start_Position,
+  Reference_Allele,
+  Tumor_Seq_Allele2
+)]
+maf$Chromosome <- gsub("^chr", "", maf$Chromosome)
+
+#Call DNDSCV function
+dndsout = dndscv(maf, refdb ="hg38", cv = NULL)
+#dndsout = dndscv(maf, refdb = "hg38", mingenecovs=100, outp=3)
+#dndsout = dndscv(maf, refdb = "hg38")
+
+
+name = sub("\\.maf$", "", basename(f))
+outdir = "~/Desktop/MAFs/Results/NoCovModel"
+
+
+#Annotated table of known mutations
+sel_cv = dndsout$sel_cv
+print(head(sel_cv), digits = 3)
+sel_loc = dndsout$sel_loc
+annotmuts = dndsout$annotmuts
+genemuts = dndsout$genemuts
+print(head(sel_loc), digits = 3)
+write.csv2(sel_loc, paste0(outdir,name,"_global_sel_loc.csv"))
+write.csv2(annotmuts, paste0(outdir,name,"_annotmuts.csv"))
+write.csv2(genemuts, paste0(outdir,name,"_genemuts.csv"))
+write.csv2(sel_cv, paste0(outdir,name,"_global_sel_cv.csv"))
+
+}
+```
+
+```{r}
+# Read the csv file, sort and get ready to plot
+
+library(data.table)
+
+files <- list.files(
+  path = "/Users/tobiagbede/Desktop/UofT/PhD/Pugh Lab/Projects/Aim1_Clones/VAF_Explore/MAFs_dndSCV/Results/CovModel",
+  pattern = "_cv\\.csv$",
+  full.names = TRUE
+)
+
+cv_data <- list()
+
+for (f in files) {
+  name <- sub("_cv\\.csv$", "", basename(f))
+  cv_data[[name]] <- read.csv2(f, stringsAsFactors = FALSE, fill= TRUE)
+}
+
+# arrange by qallsubs_cv
+
+library(dplyr)
+
+sig_list <- list()
+
+for (f in names(cv_data)) {
+  # arrange and save back into cv_data
+  cv_data[[f]] <- cv_data[[f]] %>%
+    arrange(qallsubs_cv)
+
+  # filter sig genes and store in list
+  sig_list[[paste0("sig_", f)]] <- cv_data[[f]] %>%
+    filter(qallsubs_cv <= 0.1) %>%
+    select(gene_name, qallsubs_cv)
+}
+
+# save to env
+list2env(sig_list, envir = .GlobalEnv)
+
+#Save and load all
+sig_all <- bind_rows(sig_list, .id = "sig_set") %>%
+  arrange(qallsubs_cv, gene_name)
+
+```
+
+```{r}
+#Plots!!
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(ggpubr)
+
+sig_plot <- sig_all %>%
+  mutate(sig_set2 = str_remove(sig_set, "^.*Model"))  # keep suffix after "Model" [web:106]
+
+p <- ggplot(sig_plot, aes(x = sig_set2, y = gene_name, fill = qallsubs_cv)) +
+  geom_tile() +
+  scale_fill_gradient2(
+    high = "#08306B", mid = "white", low = "#67000D",
+    midpoint = 0.09,
+    name = "qallsubs_cv"
+  ) +
+  theme_pubr(border = TRUE) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+p = p + theme(axis.text.y = element_text(size = 6))
+
+outdir = "/Users/tobiagbede/Desktop/MAFs/R/"
+
+ggsave (filename = "heatmap_genes.png", plot = p, path = outdir, dpi = 1000 )
+
+#Upset R
+library(UpSetR)
+
+# convert named list -> UpSetR "fromList" input
+gene_sets <- lapply(sig_list, \(df) df$gene_name)
+
+# Open PNG device
+png(filename = paste0(outdir, "UpsetR.png"), width = 3000, height = 2000, res = 300)  # high-res
+
+# Plot
+upset(fromList(gene_sets),
+      order.by = "freq",
+      sets.bar.color = "grey30",
+      mainbar.y.label = "Intersection size",
+      sets.x.label = "Set size")
+
+# Close device
+dev.off()
+
+```
+
+```{r}
+# List out the intersection
+
+library(dplyr)
+library(tidyr)
+
+m <- sig_all %>%
+  distinct(sig_set, gene_name) %>%   # important
+  mutate(present = TRUE) %>%
+  pivot_wider(
+    names_from  = sig_set,
+    values_from = present,
+    values_fill = FALSE
+  )
+
+
+intersection_tbl <- m %>%
+  rowwise() %>%
+  mutate(
+    intersection = paste(
+      colnames(m)[-1][as.logical(c_across(-gene_name))],
+      collapse = " & "
+    )
+  ) %>%
+  ungroup() %>%
+  group_by(intersection) %>%
+  summarise(
+    n_genes = n(),
+    genes = paste(gene_name, collapse = ", "),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_genes))
+
+View(intersection_tbl)
+
+outdir = "/Users/tobiagbede/Desktop/MAFs/R/"
+
+write.csv2(intersection_tbl, paste0(outdir, "intersections.csv") )
+write.csv2(sig_all, paste0(outdir, "sig_genes_all.csv"))
+```
+
+```{r}
+# Intersection with known MM driver gene list curated from a paper
+library(dplyr)
+library(tidyr)
+driver_genes <- MM_Gene_list$gene
+
+# Count driver genes per element of sig_list
+driver_counts <- sapply(sig_list, function(x) {
+  genes <- x$gene_name
+  sum(genes %in% driver_genes)
+})
+
+driver_counts
+
+# list the driver gene
+driver_hits <- lapply(sig_list, function(x) {
+  genes <- x$gene_name
+  intersect(genes, driver_genes)
+})
+
+driver_hits
+
+# make a table and save
+
+driver_summary <- tibble(
+  Sample = names(driver_counts),
+  Driver_Count = driver_counts,
+  Driver_Genes = driver_hits
+) %>% 
+  unnest(Driver_Genes)
+
+
+write.csv(driver_summary, "/Users/tobiagbede/Desktop/UofT/PhD/Pugh Lab/Projects/Aim1_Clones/VAF_Explore/MAFs_dndSCV/R/Driver_Genes_Intersect.csv")
+```
+
