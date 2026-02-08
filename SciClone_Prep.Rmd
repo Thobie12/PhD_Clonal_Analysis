@@ -1,0 +1,287 @@
+---
+title: "SciClone"
+output: html_document
+date: "2026-01-01"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#Instructions to run SciClone
+'
+1. Mount macfuse
+2. Find directory for the vcfs or the cna file
+3. Update directories for the input and the output int he script below
+4. Run SciClone code on the output using macbook Air (this has the code in R)
+'
+```
+
+
+```{r}
+#Extracting columns from tsv file for Illumina files
+library(VariantAnnotation)
+vcf_dir <- "/cluster/projects/pughlab/myeloma/projects/MyC/All_VCFs/All_BM_VCFs/STR_repeatmasker_and_encode_filter"
+out_dir <- "/Users/tobiagbede/Desktop/BM/CNA"
+vcf_files <- list.files(vcf_dir, pattern = "\\.vcf$", full.names = TRUE)
+genome_build <- "hg38"
+
+for (vcf_file in vcf_files) {
+  cat("Processing:", basename(vcf_file), "\n")
+  vcf <- tryCatch(readVcf(vcf_file, genome_build), error = function(e) NULL)
+  if (is.null(vcf)) next
+  
+  somatic <- subset(vcf, FILTER == "PASS")
+  if (nrow(somatic) == 0) next
+  
+  ad_list <- geno(somatic)$AD
+  n_vars <- nrow(somatic)
+  ad_matrix <- matrix(0L, nrow = n_vars, ncol = 2)  # ref, total_alt
+  
+  for (i in 1:n_vars) {
+    ad_i <- ad_list[[i]]
+    if (!is.null(ad_i) && length(ad_i) >= 2) {
+      ref_reads <- as.numeric(ad_i[1])
+      alt_reads <- sum(as.numeric(ad_i[-1]), na.rm = TRUE)
+      ad_matrix[i, 1] <- ref_reads
+      ad_matrix[i, 2] <- alt_reads
+    }
+  }
+  
+  ref_reads <- ad_matrix[,1]
+  var_reads <- ad_matrix[,2]
+  total_reads <- ref_reads + var_reads
+  vaf <- ifelse(total_reads > 0, var_reads / total_reads, 0)
+  
+  df <- data.frame(
+    chr = as.character(seqnames(somatic)),
+    pos = start(somatic),
+    ref_reads = ref_reads,
+    var_reads = var_reads,
+    vaf = pmin(vaf, 1.0)
+  )
+  
+  # Filter: min depth 50, VAF 0.01-0.99
+  df_filtered <- df[total_reads >= 50 & df$vaf > 0.01 & df$vaf < 0.99, ]
+  
+  if (nrow(df_filtered) > 0) {
+    sample_name <- tools::file_path_sans_ext(basename(vcf_file))
+    out_file <- paste0(sample_name, "_vaf.tsv")
+    write.table(df_filtered, file.path(out_dir, out_file), sep="\t", quote=FALSE, row.names=FALSE)
+    cat("Saved:", nrow(df_filtered), "variants to", out_file, "\n")
+  } else {
+    cat("No qualifying variants for", basename(vcf_file), "\n")
+  }
+}
+cat("Batch complete. Outputs in", out_dir, "\n")
+
+```
+
+```{r}
+#Extracting columns from tsv file for Illumina files
+library(VariantAnnotation)
+vcf_dir <- "/Users/tobiagbede/Desktop/cluster/projects/pughlab/myeloma/projects/MyC/All_VCFs/All_BM_VCFs/STR_repeatmasker_and_encode_filter"
+out_dir <- "/Users/tobiagbede/Desktop/BM/VCF"
+vcf_files <- list.files(vcf_dir, pattern = "\\.vcf$", full.names = TRUE)
+genome_build <- "hg38"
+
+for (vcf_file in vcf_files) {
+  cat("Processing:", basename(vcf_file), "\n")
+  vcf <- tryCatch(readVcf(vcf_file, genome_build), error = function(e) NULL)
+  if (is.null(vcf)) next
+  
+  somatic <- subset(vcf, FILTER == "PASS")
+  if (nrow(somatic) == 0) next
+  
+  ad_list <- geno(somatic)$AD
+  n_vars <- nrow(somatic)
+  ad_matrix <- matrix(0L, nrow = n_vars, ncol = 2)  # ref, total_alt
+  
+  for (i in 1:n_vars) {
+    ad_i <- ad_list[[i]]
+    if (!is.null(ad_i) && length(ad_i) >= 2) {
+      ref_reads <- as.numeric(ad_i[1])
+      alt_reads <- sum(as.numeric(ad_i[-1]), na.rm = TRUE)
+      ad_matrix[i, 1] <- ref_reads
+      ad_matrix[i, 2] <- alt_reads
+    }
+  }
+  
+  ref_reads <- ad_matrix[,1]
+  var_reads <- ad_matrix[,2]
+  total_reads <- ref_reads + var_reads
+  vaf <- ifelse(total_reads > 0, var_reads / total_reads, 0)
+  
+  df <- data.frame(
+    chr = as.character(seqnames(somatic)),
+    pos = start(somatic),
+    ref_reads = ref_reads,
+    var_reads = var_reads,
+    vaf = pmin(vaf, 1.0)
+  )
+  
+  # Filter: min depth 50, VAF 0.01-0.99
+  df_filtered <- df[total_reads >= 50 & df$vaf > 0.01 & df$vaf < 0.99, ]
+  
+  if (nrow(df_filtered) > 0) {
+    sample_name <- tools::file_path_sans_ext(basename(vcf_file))
+    out_file <- paste0(sample_name, "_vaf.tsv")
+    write.table(df_filtered, file.path(out_dir, out_file), sep="\t", quote=FALSE, row.names=FALSE)
+    cat("Saved:", nrow(df_filtered), "variants to", out_file, "\n")
+  } else {
+    cat("No qualifying variants for", basename(vcf_file), "\n")
+  }
+}
+cat("Batch complete. Outputs in", out_dir, "\n")
+
+```
+
+
+
+```{r}
+#Collecting and renaming
+vaf_dir <- "/Users/tobiagbede/Desktop/BM/VCF"
+vaf_files <- list.files(vaf_dir, "_vaf.tsv$", full.names = TRUE)
+vaf_list <- lapply(vaf_files, read.table, header=TRUE, stringsAsFactors=FALSE)
+names(vaf_list) <- gsub("_vaf.tsv$", "", basename(vaf_files))
+str(names(vaf_list))  # Verify M4/MyC sample names
+```
+
+
+```{r}
+#Extracting columns from cna file for Illumina files
+cn_seg_dir <- "/Users/tobiagbede/Desktop/cluster/projects/pughlab/myeloma/projects/MyC/Final_data_cfWGS_MS/Ichor_CNA/CNA_seg"
+out_dir <- "/Users/tobiagbede/Desktop/BM/CNA"
+seg_files <- list.files(cn_seg_dir, pattern = "(-O|-B).*\\.seg$", full.names = TRUE)
+
+for (seg_file in seg_files) {
+  cat("Processing:", basename(seg_file), "\n")
+  cn_data <- read.table(seg_file, header = TRUE, stringsAsFactors = FALSE, fill = TRUE)
+  
+  # Extract columns: chr (1), start (2), end (3), logR_Copy_Number (dynamic name, usually col 9)
+  logR_col <- grep("logR_Copy_Number", colnames(cn_data), value = TRUE)
+  if (length(logR_col) == 0) {
+    cat("No logR_Copy_Number column; skipping", basename(seg_file), "\n")
+    next
+  }
+  
+  cn <- data.frame(
+    chr = cn_data[,1],
+    start = cn_data[,2],
+    stop = cn_data[,3],
+    segment_mean = as.numeric(cn_data[[logR_col]])
+  )
+  cn <- cn[!is.na(cn$segment_mean), ]  # Drop NA
+  
+  sample_name <- tools::file_path_sans_ext(basename(seg_file))
+  out_file <- paste0(sample_name, "_cn.tsv")
+  write.table(cn, file.path(out_dir, out_file), sep = "\t", quote = FALSE, row.names = FALSE)
+  cat("Saved", nrow(cn), "segments to", out_file, "\n")
+}
+cat("Done. Match to VAFs by sample name.\n")
+
+```
+
+```{r}
+#Rename CNA
+# Set your directory
+dir <- "/Users/tobiagbede/Desktop/BM/VCF"
+
+# List all TSV files
+files <- list.files(dir, pattern = "\\.tsv$", full.names = TRUE)
+
+# Extract new names correctly
+newnames <- sub(".*(?:WG_|PG_)(.*?)\\.filter.*", "\\1.tsv", basename(files))
+
+# Full paths for new names
+newpaths <- file.path(dir, newnames)
+
+# Preview before renaming
+data.frame(old = basename(files), new = newnames)
+
+# Rename all files
+file.rename(files, newpaths)
+
+#Rename TSV
+
+# Set your directory
+dir <- "/Users/tobiagbede/Desktop/BM/CNA"
+
+# List all TSV files
+files <- list.files(dir, pattern = "\\.tsv$", full.names = TRUE)
+
+# Extract new names correctly
+newnames <- sub(".*(?:WG_|PG_)(.*?)\\.filter.*", "\\1.tsv", basename(files))
+
+# Full paths for new names
+newpaths <- file.path(dir, newnames)
+
+# Preview before renaming
+data.frame(old = basename(files), new = newnames)
+
+# Rename all files
+file.rename(files, newpaths)
+```
+
+
+```{r}
+#Extracting columns from cna file for Illumina files
+cn_seg_dir <- "/Users/tobiagbede/Desktop/cluster/projects/pughlab/myeloma/projects/MyC/Final_data_cfWGS_MS/Ichor_CNA/CNA_seg"
+out_dir    <- "/Users/tobiagbede/Desktop/Bed_Exclude"
+
+seg_files <- list.files(cn_seg_dir, pattern = "\\.seg$", full.names = TRUE)
+
+for (seg_file in seg_files) {
+  cat("Processing:", basename(seg_file), "\n")
+  cn_data <- read.table(seg_file, header = TRUE, stringsAsFactors = FALSE, fill = TRUE)
+
+  logR_col      <- grep("logR_Copy_Number", colnames(cn_data), value = TRUE)
+  event_col     <- grep("event",           colnames(cn_data), value = TRUE)
+  subclone_col  <- grep("subclone.status", colnames(cn_data), value = TRUE)
+
+  loh_mask      <- if (length(event_col)) cn_data[[event_col]] == "LOH" else FALSE
+  cn_alt_mask   <- abs(as.numeric(cn_data[[logR_col]])) > 0.2
+  subclone_mask <- if (length(subclone_col)) as.numeric(cn_data[[subclone_col]]) != 0 else FALSE
+
+  exclude_mask  <- cn_alt_mask | loh_mask | subclone_mask
+  exclude       <- cn_data[exclude_mask, 1:3]   # chr, start, end
+
+  sample_name <- tools::file_path_sans_ext(basename(seg_file))
+  if (nrow(exclude) > 0) {
+    write.table(
+      exclude,
+      file.path(out_dir, paste0(sample_name, "_exclude.bed")),
+      sep = "\t", col.names = FALSE, row.names = FALSE, quote = FALSE
+    )
+    cat("Wrote", nrow(exclude), "regions for", sample_name, "\n")
+  } else {
+    cat("No exclude regions for", sample_name, "\n")
+  }
+}
+
+#Rename BED Exclude
+# Set your directory
+dir <- "~/Desktop/Bed_Exclude"
+
+# List all TSV files
+files <- list.files(dir, pattern = "\\.bed$", full.names = TRUE)
+
+# Loop over files and rename
+for (f in files) {
+  # Extract the part after WG_ or PG_ and before .filter
+  newname <- sub(".*(?:WG_|PG_)([^.]+)\\.filter.*", "\\1.bed", basename(f))
+  
+  # Full path for new name
+  newpath <- file.path(dir, newname)
+  
+  # Rename the file
+  file.rename(f, newpath)
+}
+
+```
+
+```{r}
+# multiplying by 100
+```
+
